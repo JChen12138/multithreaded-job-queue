@@ -1,0 +1,16 @@
+# Binaries & DB
+*.exe
+
+# CMake and build artifacts
+/build/
+CMakeLists.txt
+
+# Visual Studio / VSCode
+.vscode/
+
+# Incompleted files
+/test/
+README.md
+
+# Personal used files
+note.txt
