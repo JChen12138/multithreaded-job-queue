@@ -6,7 +6,7 @@
 
 
 
-ThreadPool::ThreadPool(size_t num_threads) : running_(true) {
+ThreadPool::ThreadPool(size_t num_threads, size_t max_queue_size) : job_queue_(max_queue_size), running_(true) {
     for (size_t i = 0; i < num_threads; ++i) {
         workers_.emplace_back(&ThreadPool::worker_loop, this);
         //constructs a new std::thread in place and adds it to the vector.
@@ -17,20 +17,24 @@ ThreadPool::~ThreadPool() {
     shutdown();
 }
 
-void ThreadPool::submit(JobQueue::Job job) {
-    spdlog::info("Job submitted.");
+void ThreadPool::submit(JobMetadata metadata, std::function<void()> task) {
+    spdlog::info("Job submitted: ID = {}, Name = {}", metadata.id, metadata.name);
     jobs_in_progress_++;
-    job_queue_.push(std::move(job));
+    job_queue_.push(JobQueue::Job(std::move(metadata), std::move(task)));
 }
 
-void ThreadPool::shutdown() {
-    {
-        spdlog::info("Shutdown started...");
-        spdlog::info("Waiting for {} jobs to finish", jobs_in_progress_.load());
-        std::unique_lock<std::mutex> lock(done_mutex_);
-        cv_done_.wait(lock, [this]() {
-            return jobs_in_progress_ == 0;
-        });
+void ThreadPool::shutdown(int timeout_seconds) {
+    spdlog::info("Shutdown started...");
+    spdlog::info("Waiting for {} jobs to finish", jobs_in_progress_.load());
+    std::unique_lock<std::mutex> lock(done_mutex_);
+    bool finished = cv_done_.wait_for(lock, std::chrono::seconds(timeout_seconds), [this]() {
+        return jobs_in_progress_ == 0;
+    });
+    if (!finished) {
+        spdlog::warn("Graceful shutdown timeout reached. Proceeding with forced shutdown.");
+    } 
+    else {
+        spdlog::info("All jobs completed. Proceeding with shutdown.");
     }
 
     running_ = false;
@@ -41,22 +45,46 @@ void ThreadPool::shutdown() {
             worker.join();
         }
     }
+    spdlog::info("Shutdown complete.");
 }
 
 
 void ThreadPool::worker_loop() {
-    spdlog::debug("Worker started: thread id {}", std::this_thread::get_id());
-    while (running_) {
-        JobQueue::Job job = job_queue_.pop();
-        if (job) {
-            job();  
-            if (--jobs_in_progress_ == 0) {
-                std::lock_guard<std::mutex> lock(done_mutex_);
-                cv_done_.notify_all();
+    while (running_ || !job_queue_.empty()) {
+        JobQueue::Job job;
+        if (!job_queue_.try_pop(job)) {
+            std::this_thread::yield();
+        continue;
+        }
+
+        spdlog::info("Running job ID = {}, Name = {}, on thread {}", job.metadata.id, job.metadata.name, std::this_thread::get_id());
+
+
+        try {
+            job.task(); // Attempt to run the job
+        } catch (const std::exception& ex) {
+            spdlog::error("Job {} (ID: {}) failed with exception: {}", job.metadata.name, job.metadata.id, ex.what());
+            if (job.metadata.current_retry < job.metadata.max_retries) {
+                job.metadata.current_retry++;
+                spdlog::warn("Retrying job {} (ID: {}) [attempt {}/{}]",
+                             job.metadata.name, job.metadata.id,
+                             job.metadata.current_retry, job.metadata.max_retries);
+                job_queue_.push(std::move(job));
+            } else {
+                spdlog::error("Job {} (ID: {}) failed permanently after {} retries",
+                              job.metadata.name, job.metadata.id,
+                              job.metadata.max_retries);
             }
-        } else if (job_queue_.is_shutdown()) {
-            break;
+        } catch (...) {
+            spdlog::error("Job {} (ID: {}) failed with unknown error", job.metadata.name, job.metadata.id);
+        }
+
+        jobs_in_progress_--;
+        if (jobs_in_progress_ == 0) {
+            std::unique_lock lock(done_mutex_);
+            cv_done_.notify_all();
         }
     }
 }
+
 

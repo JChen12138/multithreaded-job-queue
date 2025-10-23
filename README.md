@@ -15,6 +15,8 @@ This project demonstrates core concepts of multithreading, synchronization, and 
 - ✅ **Graceful shutdown** that waits for all jobs to finish
 - ✅ Integrated **logging** using [`spdlog`](https://github.com/gabime/spdlog)
 - ✅ Clean, modern C++17 syntax with RAII and move semantics
+- ✅ Built-in **retry mechanism** with metadata (job ID, name, retries)
+- ✅ Command-line options for **thread count**, **queue size**, and **shutdown timeout**
 
 ---
 
@@ -22,11 +24,15 @@ This project demonstrates core concepts of multithreading, synchronization, and 
 
 ```
 .
-├── JobQueue.hpp          # Thread-safe producer-consumer queue
-├── ThreadPool.hpp        # Thread pool class definition
-├── ThreadPool.cpp        # Thread pool implementation
-├── main.cpp              # Example usage and test driver
-└── README.md             # Project documentation
+├── include/
+│   ├── JobQueue.hpp        # Thread-safe producer-consumer queue
+│   └── ThreadPool.hpp      # Thread pool class definition
+├── src/
+│   ├── JobQueue.cpp        # JobQueue implementation (if needed)
+│   └── ThreadPool.cpp      # Thread pool implementation
+├── main.cpp                # Example usage and test driver
+├── README.md               # Project documentation
+└── .gitignore              # Git ignored files
 ```
 
 ---
@@ -39,12 +45,15 @@ This project demonstrates core concepts of multithreading, synchronization, and 
 
 ### 🛠️ Compile Example
 ```bash
-g++ -std=c++17 -pthread -Iinclude     ThreadPool.cpp main.cpp -o threadpool_demo     -lspdlog
+g++ -std=c++17 -O2 -Iinclude -IC:/path/to/vcpkg/installed/x64-mingw-static/include \
+    -LC:/path/to/vcpkg/installed/x64-mingw-static/lib \
+    main.cpp src/JobQueue.cpp src/ThreadPool.cpp -o server.exe \
+    -static -lspdlog -lfmt -lws2_32 -lmswsock
 ```
 
 ### ▶️ Run
 ```bash
-./threadpool_demo
+./server --threads 2 --max_queue 10 --timeout 1
 ```
 
 ---
@@ -52,11 +61,11 @@ g++ -std=c++17 -pthread -Iinclude     ThreadPool.cpp main.cpp -o threadpool_demo
 ## 💡 Example Output
 
 ```
-[2025-10-17 14:25:52.104] [thread 1235] [info] Running job 0 on thread 140703220803328
-[2025-10-17 14:25:52.104] [thread 1236] [info] Running job 1 on thread 140703229196032
-...
-[2025-10-17 14:25:52.605] [thread 1238] [info] Computing result...
-[2025-10-17 14:25:52.606] [thread 1237] [info] Result received: 42
+[info] Job submitted: ID = 0, Name = Job_0
+[info] Running job ID = 0, Name = Job_0, on thread 3
+[info] Executing job: Job_0 (ID: 0)
+[info] Waiting for 10 jobs to finish
+[warning] Graceful shutdown timeout reached. Proceeding with forced shutdown.
 ```
 
 ---
@@ -64,35 +73,38 @@ g++ -std=c++17 -pthread -Iinclude     ThreadPool.cpp main.cpp -o threadpool_demo
 ## 🧩 Example Code (main.cpp)
 
 ```cpp
-#include <iostream>
-#include "ThreadPool.hpp"
-#include <spdlog/spdlog.h>
+int main(int argc, char* argv[]) {
+    cxxopts::Options options("server", "Multithreaded Job Queue Demo");
+    options.add_options()
+        ("threads", "Number of worker threads", cxxopts::value<int>()->default_value("4"))
+        ("max_queue", "Max job queue size", cxxopts::value<int>()->default_value("16"))
+        ("timeout", "Shutdown wait timeout", cxxopts::value<int>()->default_value("5"));
+    auto result = options.parse(argc, argv);
 
-int main() {
-    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [thread %t] [%l] %v");
-    spdlog::set_level(spdlog::level::info);
+    int num_threads = result["threads"].as<int>();
+    int max_queue = result["max_queue"].as<int>();
+    int timeout = result["timeout"].as<int>();
 
-    ThreadPool pool(4);
-
-    // Normal jobs
+    ThreadPool pool(num_threads, max_queue);
     for (int i = 0; i < 10; ++i) {
-        pool.submit([i]() {
-            spdlog::info("Running job {} on thread {}", i, std::this_thread::get_id());
+        pool.submit({i, "Job_" + std::to_string(i)}, [i]() {
+            spdlog::info("Executing job: Job_{} (ID: {})", i, i);
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
         });
     }
 
-    // Job returning a result
-    auto future = pool.submit([] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    auto future = pool.submit({42, "ComputeAnswer"}, []() -> int {
         spdlog::info("Computing result...");
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
         return 42;
     });
 
     spdlog::info("Waiting for result...");
-    int result = future.get();
-    spdlog::info("Result received: {}", result);
+    int result_value = future.get();
+    spdlog::info("Result received: {}", result_value);
 
-    pool.shutdown();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    pool.shutdown(timeout);
 }
 ```
 
@@ -105,18 +117,19 @@ int main() {
 | **Condition Variables** | Efficiently wait for new jobs without busy-waiting |
 | **Mutexes** | Protect shared queue access |
 | **Atomic Counters** | Safely track active jobs across threads |
-| **RAII** | Automatic cleanup of threads and resources |
 | **Futures / Packaged Tasks** | Retrieve results of async jobs |
-| **Logging** | Thread-safe structured runtime tracing with `spdlog` |
+| **Graceful Shutdown** | Waits for all jobs to finish or timeout |
+| **Retry Mechanism** | Automatically re-enqueue jobs on failure |
+| **Logging** | Structured, thread-aware logs with `spdlog` |
 
 ---
 
 ## 🔍 Future Improvements
 
-- [ ] Add task prioritization (priority queue)
-- [ ] Implement work stealing between threads
-- [ ] Support timed `try_pop()` for shutdown control
-- [ ] Add benchmarking for throughput and latency
+- [ ] Add task prioritization with priority queue
+- [ ] Work stealing among worker threads
+- [ ] Metrics exporter (e.g., Prometheus)
+- [ ] Job timeout + cancellation
 
 ---
 
