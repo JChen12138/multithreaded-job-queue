@@ -1,7 +1,7 @@
 # 🧵 Thread Pool with Job Queue (C++17)
 
-A lightweight, modern **C++17 thread pool** implementation with a **thread-safe job queue**, **futures for result retrieval**, and **graceful shutdown support**.  
-This project demonstrates core concepts of multithreading, synchronization, and asynchronous task scheduling using only the C++ standard library.
+A lightweight, modern **C++17 thread pool** implementation with a **thread-safe job queue**, **futures for result retrieval**, **Prometheus metrics**, and **graceful shutdown**.  
+This project demonstrates core concepts of multithreading, synchronization, task scheduling, and basic observability, all using modern C++ and open source tools.
 
 ---
 
@@ -17,6 +17,10 @@ This project demonstrates core concepts of multithreading, synchronization, and 
 - ✅ Clean, modern C++17 syntax with RAII and move semantics
 - ✅ Built-in **retry mechanism** with metadata (job ID, name, retries)
 - ✅ Command-line options for **thread count**, **queue size**, and **shutdown timeout**
+- ✅ **Prometheus-style metrics** via [`prometheus-cpp`](https://github.com/jupp0r/prometheus-cpp)
+  - Job counters: submitted / completed / failed
+  - Active job gauge
+  - `/metrics` HTTP endpoint powered by built-in Exposer
 
 ---
 
@@ -25,11 +29,15 @@ This project demonstrates core concepts of multithreading, synchronization, and 
 ```
 .
 ├── include/
-│   ├── JobQueue.hpp        # Thread-safe producer-consumer queue
-│   └── ThreadPool.hpp      # Thread pool class definition
+│   ├── JobQueue.hpp        # Thread-safe queue for job storage
+│   ├── ThreadPool.hpp      # Core thread pool logic
+│   ├── Metrics.hpp         # Lightweight wrapper around prometheus-cpp
+│   └── MetricsServer.hpp   # Singleton exposer registry
 ├── src/
-│   ├── JobQueue.cpp        # JobQueue implementation (if needed)
-│   └── ThreadPool.cpp      # Thread pool implementation
+│   ├── JobQueue.cpp
+│   ├── ThreadPool.cpp
+│   ├── Metrics.cpp
+│   └── MetricsServer.cpp
 ├── main.cpp                # Example usage and test driver
 ├── README.md               # Project documentation
 └── .gitignore              # Git ignored files
@@ -40,21 +48,25 @@ This project demonstrates core concepts of multithreading, synchronization, and 
 ## ⚙️ Build Instructions
 
 ### 🧰 Requirements
-- C++17 or newer (GCC ≥ 9 / Clang ≥ 10 / MSVC ≥ 2019)
-- [`spdlog`](https://github.com/gabime/spdlog) installed (or via vcpkg)
+- C++17-compatible compiler (GCC ≥ 9, Clang ≥ 10, or MSVC ≥ 2019)
+- [`vcpkg`](https://github.com/microsoft/vcpkg) with:
+  - `prometheus-cpp` (core + pull)
+  - `spdlog`
+  - `fmt`
+  - `cxxopts` (for CLI)
+  - `sqlite3`, `hiredis`, and `redis++` if enabled later
 
 ### 🛠️ Compile Example
 ```bash
-g++ -std=c++17 -O2 -Iinclude -IC:/path/to/vcpkg/installed/x64-mingw-static/include \
-    -LC:/path/to/vcpkg/installed/x64-mingw-static/lib \
-    main.cpp src/JobQueue.cpp src/ThreadPool.cpp -o server.exe \
-    -static -lspdlog -lfmt -lws2_32 -lmswsock
+g++ -std=c++17 -O2   -Iinclude   -IC:/path/to/vcpkg/installed/x64-mingw-static/include   -LC:/path/to/vcpkg/installed/x64-mingw-static/lib   main.cpp src/*.cpp -o server.exe   -static -lspdlog -lfmt -lprometheus-cpp-core -lprometheus-cpp-pull -lws2_32 -lmswsock
 ```
 
 ### ▶️ Run
 ```bash
 ./server --threads 2 --max_queue 10 --timeout 1
 ```
+
+Then, visit: [http://localhost:8080/metrics](http://localhost:8080/metrics)
 
 ---
 
@@ -70,43 +82,14 @@ g++ -std=c++17 -O2 -Iinclude -IC:/path/to/vcpkg/installed/x64-mingw-static/inclu
 
 ---
 
-## 🧩 Example Code (main.cpp)
+## 📊 Metrics Overview
 
-```cpp
-int main(int argc, char* argv[]) {
-    cxxopts::Options options("server", "Multithreaded Job Queue Demo");
-    options.add_options()
-        ("threads", "Number of worker threads", cxxopts::value<int>()->default_value("4"))
-        ("max_queue", "Max job queue size", cxxopts::value<int>()->default_value("16"))
-        ("timeout", "Shutdown wait timeout", cxxopts::value<int>()->default_value("5"));
-    auto result = options.parse(argc, argv);
-
-    int num_threads = result["threads"].as<int>();
-    int max_queue = result["max_queue"].as<int>();
-    int timeout = result["timeout"].as<int>();
-
-    ThreadPool pool(num_threads, max_queue);
-    for (int i = 0; i < 10; ++i) {
-        pool.submit({i, "Job_" + std::to_string(i)}, [i]() {
-            spdlog::info("Executing job: Job_{} (ID: {})", i, i);
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        });
-    }
-
-    auto future = pool.submit({42, "ComputeAnswer"}, []() -> int {
-        spdlog::info("Computing result...");
-        std::this_thread::sleep_for(std::chrono::milliseconds(600));
-        return 42;
-    });
-
-    spdlog::info("Waiting for result...");
-    int result_value = future.get();
-    spdlog::info("Result received: {}", result_value);
-
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-    pool.shutdown(timeout);
-}
-```
+| Metric | Type | Description |
+|--------|------|-------------|
+| `jobs_submitted_total` | Counter | Total number of jobs submitted |
+| `jobs_completed_total` | Counter | Jobs successfully completed |
+| `jobs_failed_total`    | Counter | Jobs that threw exceptions |
+| `active_jobs`          | Gauge   | Number of currently running jobs |
 
 ---
 
@@ -128,8 +111,8 @@ int main(int argc, char* argv[]) {
 
 - [ ] Add task prioritization with priority queue
 - [ ] Work stealing among worker threads
-- [ ] Metrics exporter (e.g., Prometheus)
 - [ ] Job timeout + cancellation
+- [ ] Setup **Docker + Prometheus + Grafana** stack
 
 ---
 

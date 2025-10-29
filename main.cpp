@@ -4,10 +4,13 @@
 #include <spdlog/spdlog.h>
 #include "formatters/thread_id_formatter.hpp"
 #include <cxxopts.hpp>
+#include "Metrics.hpp"
 
 std::mutex cout_mutex;
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) {\
+    spdlog::info("Initializing Prometheus metrics server...");
+    Metrics::instance().init("/metrics");
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [thread %t] [%l] %v");
     spdlog::set_level(spdlog::level::info);
 
@@ -78,8 +81,8 @@ int main(int argc, char* argv[]) {
     // --- Job returning a result ---
     auto future = pool.submit({42, "ComputeAnswer"}, [] {
         spdlog::info("Computing result...");
-        //std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        std::this_thread::sleep_for(std::chrono::seconds(2)); 
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        //std::this_thread::sleep_for(std::chrono::seconds(2)); 
         return 42;
     });
 

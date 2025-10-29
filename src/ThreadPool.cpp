@@ -2,7 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <thread>
 #include "formatters/thread_id_formatter.hpp"
-
+#include "Metrics.hpp"
 
 
 
@@ -14,13 +14,17 @@ ThreadPool::ThreadPool(size_t num_threads, size_t max_queue_size) : job_queue_(m
 }
 
 ThreadPool::~ThreadPool() {
-    shutdown();
+    if (running_) {
+        shutdown();  
+    }
 }
 
 void ThreadPool::submit(JobMetadata metadata, std::function<void()> task) {
     spdlog::info("Job submitted: ID = {}, Name = {}", metadata.id, metadata.name);
     jobs_in_progress_++;
     job_queue_.push(JobQueue::Job(std::move(metadata), std::move(task)));
+    Metrics::instance().job_submitted().Increment();
+    Metrics::instance().active_jobs().Increment();
 }
 
 void ThreadPool::shutdown(int timeout_seconds) {
@@ -46,6 +50,9 @@ void ThreadPool::shutdown(int timeout_seconds) {
         }
     }
     spdlog::info("Shutdown complete.");
+    spdlog::info("Active jobs:    {}", Metrics::instance().active_jobs().Value());
+
+
 }
 
 
@@ -62,6 +69,8 @@ void ThreadPool::worker_loop() {
 
         try {
             job.task(); // Attempt to run the job
+            Metrics::instance().job_completed().Increment();
+            Metrics::instance().active_jobs().Decrement();
         } catch (const std::exception& ex) {
             spdlog::error("Job {} (ID: {}) failed with exception: {}", job.metadata.name, job.metadata.id, ex.what());
             if (job.metadata.current_retry < job.metadata.max_retries) {
@@ -77,6 +86,9 @@ void ThreadPool::worker_loop() {
             }
         } catch (...) {
             spdlog::error("Job {} (ID: {}) failed with unknown error", job.metadata.name, job.metadata.id);
+            Metrics::instance().job_failed().Increment();
+            Metrics::instance().active_jobs().Decrement();
+
         }
 
         jobs_in_progress_--;
