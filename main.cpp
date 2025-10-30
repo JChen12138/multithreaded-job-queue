@@ -21,6 +21,7 @@ int main(int argc, char* argv[]) {\
         ("q,max_queue", "Max queue size", cxxopts::value<int>()->default_value("100"))
         ("test_retry", "Enable test retry jobs")
         ("timeout", "Shutdown timeout in seconds", cxxopts::value<int>()->default_value("5"))
+        ("job_timeout", "Per-job timeout in milliseconds", cxxopts::value<int>()->default_value("0")) 
         ("h,help", "Print usage");
 
     auto options_result = options.parse(argc, argv);
@@ -44,13 +45,17 @@ int main(int argc, char* argv[]) {\
 
     bool test_retry = options_result["test_retry"].as<bool>();
 
+    int job_timeout_ms = options_result["job_timeout"].as<int>();
+
     if (test_retry) {
         spdlog::info("Submitting test jobs with retry logic");
         for (int i = 0; i < 10; ++i) {
             JobMetadata metadata(i, "RetryJob_" + std::to_string(i), 2); // Retry up to 2 times
 
-            pool.submit(metadata, [metadata]() {
+            pool.submit(std::move(metadata), [&metadata]() {
+                
                 spdlog::info("Executing job: {} (ID: {})", metadata.name, metadata.id);
+             
                 std::this_thread::sleep_for(std::chrono::milliseconds(100)); 
 
                 // Simulate failure for every 3rd job
@@ -64,10 +69,14 @@ int main(int argc, char* argv[]) {\
         spdlog::info("Submitting normal jobs");
         for (int i = 0; i < 10; ++i) {
             JobMetadata metadata(i, "Job_" + std::to_string(i));
-
+            if (job_timeout_ms > 0) {
+                metadata.timeout = std::chrono::milliseconds(job_timeout_ms); 
+            }
             auto start = std::chrono::steady_clock::now();
-            pool.submit(metadata, [metadata]() {
-                spdlog::info("Executing job: {} (ID: {})", metadata.name, metadata.id);
+            pool.submit(std::move(metadata), [&metadata]() {
+
+            spdlog::info("Executing job: {} (ID: {})", metadata.name, metadata.id);
+
                 std::this_thread::sleep_for(std::chrono::milliseconds(300)); 
             });
             auto end = std::chrono::steady_clock::now();
@@ -76,21 +85,21 @@ int main(int argc, char* argv[]) {\
             spdlog::info("Job submission {} took {:.3f} seconds", i, duration.count());
         }
     }
-    
 
     // --- Job returning a result ---
-    auto future = pool.submit({42, "ComputeAnswer"}, [] {
-        spdlog::info("Computing result...");
+    JobMetadata metadata{42, "ComputeAnswer"};
+    metadata.allow_retry = false;
+    std::string name_copy = metadata.name;
+    int id_copy = metadata.id;
+
+    auto future = pool.submit(std::move(metadata), [name = std::move(name_copy), id = id_copy] {
+        if (!name.empty()) {
+            spdlog::info("Executing job: {} (ID: {})", name, id);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        //std::this_thread::sleep_for(std::chrono::seconds(2)); 
         return 42;
     });
 
-    // call shutdown BEFORE result is ready
-    /*
-    spdlog::info("Initiating shutdown while job is still running...");
-    pool.shutdown(timeout);  
-    */
 
     spdlog::info("Waiting for result...");
     int result_value = future.get();

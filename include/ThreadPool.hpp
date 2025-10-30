@@ -6,13 +6,15 @@
 #include "JobQueue.hpp"
 #include <sstream>
 #include <future>
+#include <spdlog/spdlog.h>
+
 
 
 class ThreadPool {
 public:
     explicit ThreadPool(size_t num_threads, size_t max_queue_size = 100);
     ~ThreadPool();//called automatically when the ThreadPool object goes out of scope or is deleted.
-    void submit(JobMetadata metadata, std::function<void()> task);
+    void submit(JobMetadata&& metadata, std::function<void()> task);
     template<typename Func>
     auto submit(Func&& func) -> std::future<decltype(func())> {
     //the caller receives a std::future that will later hold the result of the submitted job.
@@ -31,20 +33,35 @@ public:
     }
 
     template<typename Func>
-    auto submit(JobMetadata metadata, Func&& func) -> std::future<decltype(func())> {
+    auto submit(JobMetadata&& metadata, Func&& func) -> std::future<decltype(func())> {
         using ResultType = decltype(func());
 
-        auto task = std::make_shared<std::packaged_task<ResultType()>>(std::forward<Func>(func));
-        auto future = task->get_future();
+        auto promise = std::make_shared<std::promise<ResultType>>();
+        auto future = promise->get_future();
 
-        // Wrap the lambda into std::function to call the right overload
-        std::function<void()> wrapper = [task]() { (*task)(); };
-        submit(std::move(metadata), std::move(wrapper));  // Call the non-template overload
+        std::function<void()> wrapper = [promise, f = std::forward<Func>(func)]() mutable {
+            try {
+                if constexpr (std::is_void_v<ResultType>) {
+                    f();
+                    promise->set_value();
+                } else {
+                    auto result = f();
+                    promise->set_value(result);
+                }
+            } catch (const std::future_error& e) {
+                spdlog::warn("Promise already fulfilled or invalid: {}", e.what());
+            } catch (...) {
+                try {
+                    promise->set_exception(std::current_exception());
+                } catch (...) {
+                    spdlog::warn("Failed to set exception on promise");
+                }
+            }
+        };
 
+        submit(std::move(metadata), std::move(wrapper));
         return future;
     }
-
-
 
     void shutdown(int timeout_seconds = 5);
 
