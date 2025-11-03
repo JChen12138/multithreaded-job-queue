@@ -7,6 +7,7 @@
 #include <sstream>
 #include <future>
 #include <spdlog/spdlog.h>
+#include "Metrics.hpp"
 
 
 
@@ -16,25 +17,10 @@ public:
     ~ThreadPool();//called automatically when the ThreadPool object goes out of scope or is deleted.
     void submit(JobMetadata&& metadata, std::function<void()> task);
     template<typename Func>
-    auto submit(Func&& func) -> std::future<decltype(func())> {
-    //the caller receives a std::future that will later hold the result of the submitted job.
-        using ResultType = decltype(func());
-
-        // wrap function into a packaged_task so we can get its result later
-        auto task = std::make_shared<std::packaged_task<ResultType()>>(std::forward<Func>(func));
-        std::future<ResultType> result = task->get_future();
-
-        jobs_in_progress_++;  // track active jobs
-        job_queue_.push(JobQueue::Job(JobMetadata(-1, "packaged_task"), [task]() {
-            (*task)();  // Runs the packaged task, sets future
-        }));
-
-        return result;
-    }
-
-    template<typename Func>
     auto submit(JobMetadata&& metadata, Func&& func) -> std::future<decltype(func())> {
         using ResultType = decltype(func());
+
+        metadata.allow_retry = false;
 
         auto promise = std::make_shared<std::promise<ResultType>>();
         auto future = promise->get_future();
@@ -59,9 +45,15 @@ public:
             }
         };
 
-        submit(std::move(metadata), std::move(wrapper));
+        //DIRECTLY enqueue the job instead of calling another submit()
+        jobs_in_progress_++;
+        job_queue_.push(JobQueue::Job(std::move(metadata), std::move(wrapper)));
+        Metrics::instance().job_submitted().Increment();
+        Metrics::instance().active_jobs().Increment();
+
         return future;
     }
+
 
     void shutdown(int timeout_seconds = 5);
 

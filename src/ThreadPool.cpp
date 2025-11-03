@@ -81,21 +81,54 @@ void ThreadPool::worker_loop() {
         try {
             // --- With timeout ---
             if (job.metadata.timeout.count() > 0) {
-                auto start_time = std::chrono::steady_clock::now();
+                auto safe_task = std::make_shared<std::function<void()>>(std::move(job.task));
+                std::packaged_task<void()> wrapper_task([safe_task]() {
+                    try {
+                        (*safe_task)();
+                    } catch (...) {
+                        spdlog::warn("Unhandled error inside job task");
+                    }
+                });
+                auto future = wrapper_task.get_future();
+                std::thread worker(std::move(wrapper_task));
 
+                // Wait for the task to finish or timeout
+                if (future.wait_for(job.metadata.timeout) == std::future_status::timeout) {
+                    job.metadata.cancel_requested = true;
+                    timed_out = true;
+                    spdlog::warn("Job {} (ID: {}) timed out after {}ms",
+                                job.metadata.name, job.metadata.id,
+                                job.metadata.timeout.count());
+                    try {
+                        worker.detach();
+                    } catch (...) {
+                        spdlog::warn("Failed to detach timed‑out job thread safely");
+                    }
+                    Metrics::instance().job_failed().Increment();
+                } else {
+                    worker.join();
+                    Metrics::instance().job_completed().Increment();
+                }
+            }
+
+                /*
+                auto start_time = std::chrono::steady_clock::now();
+                
                 // Capture task into a shared_ptr so it’s not moved twice
                 auto safe_task = std::make_shared<std::function<void()>>(std::move(job.task));
 
-                std::packaged_task<void()> wrapper_task([safe_task, &job]() {
+                // Move metadata out first
+                JobMetadata& job_meta = job.metadata; // Use ref so cancellation is respected
+
+                std::packaged_task<void()> wrapper_task([safe_task, &job_meta]() {
                     try {
-                        if (!job.metadata.cancel_requested)
+                        if (!job_meta.cancel_requested)
                             (*safe_task)();
-                    } catch (const std::exception& e) {
-                        spdlog::error("Job {} (ID: {}) threw exception in wrapper: {}",
-                                      job.metadata.name, job.metadata.id, e.what());
-                        throw;
+                    } catch (...) {
+                        spdlog::warn("Unhandled error inside job task");
                     }
                 });
+
 
                 auto future = wrapper_task.get_future();
                 std::thread worker(std::move(wrapper_task));
@@ -124,7 +157,7 @@ void ThreadPool::worker_loop() {
                     }
                     Metrics::instance().job_completed().Increment();
                 }
-            }
+            }*/
             // --- No timeout ---
             else {
                 job.task();
@@ -139,17 +172,14 @@ void ThreadPool::worker_loop() {
             spdlog::warn("Future error in job {} (ID {}): {}", job.metadata.name, job.metadata.id, e.what());
         } catch (const std::exception& ex) {
             spdlog::error("Job {} (ID: {}) failed: {}", job.metadata.name, job.metadata.id, ex.what());
-            if (!timed_out && job.metadata.allow_retry &&
-                job.metadata.current_retry < job.metadata.max_retries) {
+            if (!job.metadata.cancel_requested && job.metadata.allow_retry && job.metadata.current_retry < job.metadata.max_retries) {
+                    spdlog::warn("Retrying job {} (ID: {}) [attempt {}/{}]",job.metadata.name, job.metadata.id,
+                    job.metadata.current_retry + 1, job.metadata.max_retries);
                 job.metadata.current_retry++;
-                spdlog::warn("Retrying job {} (ID: {}) [attempt {}/{}]",
-                             job.metadata.name, job.metadata.id,
-                             job.metadata.current_retry, job.metadata.max_retries);
                 job_queue_.push(std::move(job));
-            } else {
-                spdlog::error("Job {} (ID: {}) failed permanently after {} retries",
-                              job.metadata.name, job.metadata.id, job.metadata.max_retries);
-                Metrics::instance().job_failed().Increment();
+            } else if (job.metadata.allow_retry) {
+                spdlog::info("Job {} (ID: {}) not retried: timed_out={}, current_retry={}, max_retries={}",
+                    job.metadata.name, job.metadata.id, timed_out, job.metadata.current_retry, job.metadata.max_retries);
             }
         } catch (...) {
             spdlog::error("Job {} (ID: {}) failed with unknown error", job.metadata.name, job.metadata.id);

@@ -16,6 +16,7 @@ This project demonstrates core concepts of multithreading, synchronization, task
 - ✅ Integrated **logging** using [`spdlog`](https://github.com/gabime/spdlog)
 - ✅ Clean, modern C++17 syntax with RAII and move semantics
 - ✅ Built-in **retry mechanism** with metadata (job ID, name, retries)
+- ✅ Per-job **timeout support** with logging and cancellation
 - ✅ Command-line options for **thread count**, **queue size**, and **shutdown timeout**
 - ✅ **Prometheus-style metrics** via [`prometheus-cpp`](https://github.com/jupp0r/prometheus-cpp)
   - Job counters: submitted / completed / failed
@@ -63,7 +64,7 @@ g++ -std=c++17 -O2   -Iinclude   -IC:/path/to/vcpkg/installed/x64-mingw-static/i
 
 ### ▶️ Run
 ```bash
-./server --threads 2 --max_queue 10 --timeout 1
+./server --threads 2 --max_queue 10 --job_timeout 150
 ```
 
 Then, visit: [http://localhost:8080/metrics](http://localhost:8080/metrics)
@@ -73,11 +74,13 @@ Then, visit: [http://localhost:8080/metrics](http://localhost:8080/metrics)
 ## 💡 Example Output
 
 ```
-[info] Job submitted: ID = 0, Name = Job_0
-[info] Running job ID = 0, Name = Job_0, on thread 3
-[info] Executing job: Job_0 (ID: 0)
-[info] Waiting for 10 jobs to finish
-[warning] Graceful shutdown timeout reached. Proceeding with forced shutdown.
+[info] Submitting normal jobs
+[info] Queue size after push: 5
+[info] Running job ID = 3, Name = Job_3, on thread 2
+[info] Executing job: Job_3 (ID: 3)
+[warning] Job Job_3 (ID: 3) timed out after 150ms
+[info] Result received: 42
+[info] Shutdown complete.
 ```
 
 ---
@@ -103,6 +106,7 @@ Then, visit: [http://localhost:8080/metrics](http://localhost:8080/metrics)
 | **Futures / Packaged Tasks** | Retrieve results of async jobs |
 | **Graceful Shutdown** | Waits for all jobs to finish or timeout |
 | **Retry Mechanism** | Automatically re-enqueue jobs on failure |
+| **Timeout Logic** | Terminates long-running jobs after N ms |
 | **Logging** | Structured, thread-aware logs with `spdlog` |
 
 ---
@@ -111,7 +115,6 @@ Then, visit: [http://localhost:8080/metrics](http://localhost:8080/metrics)
 
 - [ ] Add task prioritization with priority queue
 - [ ] Work stealing among worker threads
-- [ ] Job timeout + cancellation
 - [ ] Setup **Docker + Prometheus + Grafana** stack
 
 ---

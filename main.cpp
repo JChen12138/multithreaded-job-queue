@@ -51,15 +51,12 @@ int main(int argc, char* argv[]) {\
         spdlog::info("Submitting test jobs with retry logic");
         for (int i = 0; i < 10; ++i) {
             JobMetadata metadata(i, "RetryJob_" + std::to_string(i), 2); // Retry up to 2 times
-
-            pool.submit(std::move(metadata), [&metadata]() {
-                
-                spdlog::info("Executing job: {} (ID: {})", metadata.name, metadata.id);
-             
-                std::this_thread::sleep_for(std::chrono::milliseconds(100)); 
-
-                // Simulate failure for every 3rd job
-                if (metadata.id % 3 == 0) {
+            std::string name_copy = metadata.name;
+            int id_copy = metadata.id;
+            pool.submit(std::move(metadata), [name = std::move(name_copy), id = id_copy]() {
+                spdlog::info("Executing job: {} (ID: {})", name, id);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (id % 3 == 0) {
                     throw std::runtime_error("Simulated failure for retry test");
                 }
             });
@@ -73,12 +70,13 @@ int main(int argc, char* argv[]) {\
                 metadata.timeout = std::chrono::milliseconds(job_timeout_ms); 
             }
             auto start = std::chrono::steady_clock::now();
-            pool.submit(std::move(metadata), [&metadata]() {
-
-            spdlog::info("Executing job: {} (ID: {})", metadata.name, metadata.id);
-
+            std::string name_copy = metadata.name;
+            int id_copy = metadata.id;
+            pool.submit(std::move(metadata), [name = std::move(name_copy), id = id_copy]() {
+                spdlog::info("Executing job: {} (ID: {})", name, id);
                 std::this_thread::sleep_for(std::chrono::milliseconds(300)); 
             });
+
             auto end = std::chrono::steady_clock::now();
 
             std::chrono::duration<double> duration = end - start;
@@ -89,16 +87,16 @@ int main(int argc, char* argv[]) {\
     // --- Job returning a result ---
     JobMetadata metadata{42, "ComputeAnswer"};
     metadata.allow_retry = false;
+    metadata.timeout = std::chrono::milliseconds(1000);  // 1 second
     std::string name_copy = metadata.name;
     int id_copy = metadata.id;
 
-    auto future = pool.submit(std::move(metadata), [name = std::move(name_copy), id = id_copy] {
-        if (!name.empty()) {
-            spdlog::info("Executing job: {} (ID: {})", name, id);
-        }
+    auto future = pool.submit(std::move(metadata), [name = name_copy, id = id_copy]() {
+        spdlog::info("Executing job: {} (ID: {})", name, id);
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         return 42;
     });
+
 
 
     spdlog::info("Waiting for result...");
