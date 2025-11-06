@@ -24,7 +24,8 @@ JobQueue::Job JobQueue::pop() {
         return Job(JobMetadata(-1, "empty"), []() {});
     }
 
-    Job job = std::move(queue_.front());
+    //Job job = std::move(queue_.front());
+    Job job = std::move(const_cast<Job&>(queue_.top()));
     queue_.pop();
     not_full_cv_.notify_one();  // signal producer
     return job;
@@ -34,7 +35,8 @@ bool JobQueue::try_pop(Job& job) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (queue_.empty()) return false;
 
-    job = std::move(queue_.front());
+    //job = std::move(queue_.front());
+     job = std::move(const_cast<Job&>(queue_.top()));  
     queue_.pop();
     return true;
 }

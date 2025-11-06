@@ -97,6 +97,8 @@ int main(int argc, char* argv[]) {\
         return 42;
     });
 
+    
+
 
 
     spdlog::info("Waiting for result...");
@@ -104,6 +106,18 @@ int main(int argc, char* argv[]) {\
     spdlog::info("Result received: {}", result_value);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Test priority behavior (overwrite job IDs so they're unique)
+    pool.submit(JobMetadata(100, "prio_5", 5), [] {
+        spdlog::info("Running prio_5 job");
+    });
+    pool.submit(JobMetadata(101, "prio_1", 1), [] {
+        spdlog::info("Running prio_1 job");
+    });
+    pool.submit(JobMetadata(102, "prio_9", 9), [] {
+        spdlog::info("Running prio_9 job");
+    });
+
     pool.shutdown(timeout);
 
     return 0;

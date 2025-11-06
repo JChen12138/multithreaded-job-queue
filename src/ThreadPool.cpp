@@ -79,6 +79,7 @@ void ThreadPool::worker_loop() {
         bool timed_out = false;
 
         try {
+            auto start = std::chrono::steady_clock::now(); 
             // --- With timeout ---
             if (job.metadata.timeout.count() > 0) {
                 auto safe_task = std::make_shared<std::function<void()>>(std::move(job.task));
@@ -108,63 +109,24 @@ void ThreadPool::worker_loop() {
                 } else {
                     worker.join();
                     Metrics::instance().job_completed().Increment();
-                }
+                    auto end = std::chrono::steady_clock::now();
+                    std::chrono::duration<double> latency = end - start;
+                if (!timed_out && !job.metadata.cancel_requested)
+                    Metrics::instance().job_latency().Observe(latency.count());                }
             }
-
-                /*
-                auto start_time = std::chrono::steady_clock::now();
-                
-                // Capture task into a shared_ptr so it’s not moved twice
-                auto safe_task = std::make_shared<std::function<void()>>(std::move(job.task));
-
-                // Move metadata out first
-                JobMetadata& job_meta = job.metadata; // Use ref so cancellation is respected
-
-                std::packaged_task<void()> wrapper_task([safe_task, &job_meta]() {
-                    try {
-                        if (!job_meta.cancel_requested)
-                            (*safe_task)();
-                    } catch (...) {
-                        spdlog::warn("Unhandled error inside job task");
-                    }
-                });
-
-
-                auto future = wrapper_task.get_future();
-                std::thread worker(std::move(wrapper_task));
-
-                if (future.wait_for(job.metadata.timeout) == std::future_status::timeout) {
-                    job.metadata.cancel_requested = true;
-                    timed_out = true;
-                    spdlog::warn("Job {} (ID: {}) timed out after {}ms",
-                                 job.metadata.name, job.metadata.id,
-                                 job.metadata.timeout.count());
-
-                    // Don't crash on detach — task may already have exited
-                    try {
-                        worker.detach();
-                    } catch (...) {
-                        spdlog::warn("Failed to detach timed‑out job thread safely");
-                    }
-
-                    Metrics::instance().job_failed().Increment();
-                } else {
-                    // Finished within time
-                    try {
-                        worker.join();
-                    } catch (const std::system_error& e) {
-                        spdlog::warn("Join failed for job {}: {}", job.metadata.name, e.what());
-                    }
-                    Metrics::instance().job_completed().Increment();
-                }
-            }*/
             // --- No timeout ---
             else {
                 job.task();
                 Metrics::instance().job_completed().Increment();
+                auto end = std::chrono::steady_clock::now();
+                std::chrono::duration<double> latency = end - start;
+                if (!timed_out && !job.metadata.cancel_requested)
+                    Metrics::instance().job_latency().Observe(latency.count());
             }
 
             Metrics::instance().active_jobs().Decrement();
+            
+            
         }
 
         // --- Unified exception guard ---

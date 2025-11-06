@@ -13,6 +13,7 @@ struct JobMetadata {
     std::chrono::milliseconds timeout = std::chrono::milliseconds(0); // 0 = no timeout
     std::atomic<bool> cancel_requested{false};
     bool allow_retry = true;
+    int priority = 10;
 
     JobMetadata() = default;
 

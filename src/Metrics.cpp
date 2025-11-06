@@ -36,4 +36,14 @@ void Metrics::init(const std::string& endpoint) {
         .Help("Current number of active jobs")
         .Register(*registry_);
     active_jobs_ = &gauge_family.Add({});
+
+    auto& latency_family = BuildHistogram()
+        .Name("job_latency_seconds")
+        .Help("Job execution latency in seconds")
+        .Register(*registry_);
+    job_latency_ = &latency_family.Add({}, Histogram::BucketBoundaries{0.01, 0.05, 0.1, 0.3, 0.5, 1.0, 2.0});
+}
+
+Histogram& Metrics::job_latency() {
+    return *job_latency_;
 }
