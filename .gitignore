@@ -8,8 +8,5 @@ CMakeLists.txt
 # Visual Studio / VSCode
 .vscode/
 
-# Incompleted files
-/test/
-
 # Personal used files
 note.txt
