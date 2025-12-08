@@ -5,6 +5,9 @@
 #include "formatters/thread_id_formatter.hpp"
 #include <cxxopts.hpp>
 #include "Metrics.hpp"
+#include "LRUCache.hpp"
+LRUCache<std::string, int> result_cache(100); // adjust capacity as needed
+
 
 std::mutex cout_mutex;
 
@@ -41,12 +44,43 @@ int main(int argc, char* argv[]) {\
     int max_queue = options_result["max_queue"].as<int>();
     ThreadPool pool(num_threads, max_queue);
 
+        // --- Test LRU Cache ---
+    spdlog::info("Testing LRUCache with capacity 3");
+    LRUCache<int, std::string> cache(3);
+
+    cache.put(1, "one");
+    cache.put(2, "two");
+    cache.put(3, "three");
+
+    std::string value;
+    if (cache.get(2, value)) {
+        spdlog::info("LRUCache: Key 2 found -> {}", value);
+    }
+
+    cache.put(4, "four"); // Evicts key 1
+
+    if (!cache.get(1, value)) {
+        spdlog::info("LRUCache: Key 1 was evicted");
+    }
+
+    if (cache.get(3, value)) {
+        spdlog::info("LRUCache: Key 3 found -> {}", value);
+    }
+
+    cache.put(5, "five"); // Evicts key 2
+
+    if (!cache.get(2, value)) {
+        spdlog::info("LRUCache: Key 2 was evicted");
+    }
+
+
     int timeout = options_result["timeout"].as<int>();
 
     bool test_retry = options_result["test_retry"].as<bool>();
 
     int job_timeout_ms = options_result["job_timeout"].as<int>();
 
+    
     if (test_retry) {
         spdlog::info("Submitting test jobs with retry logic");
         for (int i = 0; i < 10; ++i) {
@@ -88,22 +122,33 @@ int main(int argc, char* argv[]) {\
     JobMetadata metadata{42, "ComputeAnswer"};
     metadata.allow_retry = false;
     metadata.timeout = std::chrono::milliseconds(1000);  // 1 second
-    std::string name_copy = metadata.name;
-    int id_copy = metadata.id;
 
-    auto future = pool.submit(std::move(metadata), [name = name_copy, id = id_copy]() {
-        spdlog::info("Executing job: {} (ID: {})", name, id);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        return 42;
-    });
+    std::string cache_key = metadata.name + std::to_string(metadata.id); // Unique cache key
+    int cached_value;
+    if (result_cache.get(cache_key, cached_value)) {
+        spdlog::info("Cache hit for job: {}", metadata.name);
+        spdlog::info("Cached result: {}", cached_value);
+    } else {
+        spdlog::info("Cache miss for job: {}", metadata.name);
 
-    
+        std::string name_copy = metadata.name;
+        int id_copy = metadata.id;
+
+        auto future = pool.submit(std::move(metadata), [name = std::move(name_copy), id = id_copy, cache_key]() {
+            spdlog::info("Executing job: {} (ID: {})", name, id);
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            int result = 42;
+
+            result_cache.put(cache_key, result);  // Store result in cache
+            return result;
+        });
+
+        spdlog::info("Waiting for result...");
+        int result_value = future.get();
+        spdlog::info("Result received: {}", result_value);
+    }
 
 
-
-    spdlog::info("Waiting for result...");
-    int result_value = future.get();
-    spdlog::info("Result received: {}", result_value);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
