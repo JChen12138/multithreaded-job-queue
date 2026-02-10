@@ -156,3 +156,42 @@ This project was built as part of a hands-on learning path to strengthen underst
 ## License
 
 MIT License © 2025 Weijia Chen
+
+
+## System Architecturex
+
+```
+┌──────────────┐
+│  Main Thread │ ◀──── CLI options, job submission, shutdown
+└──────┬───────┘
+       │
+       ▼
+┌────────────────────────────┐
+│        ThreadPool          │ ◀───── submit() API
+│ ┌────────────────────────┐ │
+│ │      Worker Threads    │ │ ◀───── std::thread pool
+│ │  (loop + wait + exec)  │ │
+│ └────────┬───────────────┘ │
+│          ▼                 │
+│     ┌────────────┐         │
+│     │  JobQueue  │ ◀─────── bounded, thread-safe, supports metadata
+│     └────────────┘         │
+│     ▲        │             │
+│     │        ▼             │
+│ Timeout  Retry Logic       │ ◀───── optional wrappers
+└────────┬───────────────────┘
+         │
+         ▼
+  ┌────────────┐
+  │ LRU Cache  │ ◀───── optionally queried before expensive jobs
+  └────────────┘
+
+         │
+         ▼
+  ┌────────────────────┐
+  │  Metrics Server    │ ◀──── prometheus-cpp + Exposer
+  └────────────────────┘
+         ▲
+         │
+ Exposes /metrics endpoint
+```
