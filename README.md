@@ -1,7 +1,16 @@
 # Thread Pool with Job Queue (C++17)
 
 A lightweight, modern **C++17 thread pool** implementation with a **thread-safe job queue**, **futures for result retrieval**, **Prometheus metrics**, and **graceful shutdown**.  
-This project demonstrates core concepts of multithreading, synchronization, task scheduling, and basic observability, all using modern C++ and open source tools.
+This project demonstrates core concepts of multithreading, synchronization, task scheduling, caching, and basic observability, all using modern C++ and open source tools.
+
+---
+
+## Recent Additions (as of December 2025)
+
+- **Thread-safe LRU Cache** module added for result memoization
+- **Unit tests for LRU Cache** with Catch2 framework
+- **Debug build setup verified**
+- **Unit tests for JobQueue** using Catch2
 
 ---
 
@@ -25,6 +34,8 @@ This project demonstrates core concepts of multithreading, synchronization, task
 - **Priority-based scheduling** using a **min-heap priority queue**
   - Lower numeric value = higher priority
   - Example: priority `1` runs before `5`
+- **Thread-safe LRU Cache** for memoization
+- **Unit test coverage** for core components
 
 ---
 
@@ -35,13 +46,18 @@ This project demonstrates core concepts of multithreading, synchronization, task
 ├── include/
 │   ├── JobQueue.hpp        # Thread-safe queue for job storage
 │   ├── ThreadPool.hpp      # Core thread pool logic
+│   ├── LRUCache.hpp        # Thread-safe LRU cache module 
 │   ├── Metrics.hpp         # Lightweight wrapper around prometheus-cpp
 │   └── MetricsServer.hpp   # Singleton exposer registry
 ├── src/
 │   ├── JobQueue.cpp
 │   ├── ThreadPool.cpp
+│   ├── LRUCache.cpp        # LRU cache implementation
 │   ├── Metrics.cpp
 │   └── MetricsServer.cpp
+├── test/
+│   ├── test_LRUCache.cpp   # Unit test for LRU cache
+│   └── test_job_queue.cpp  # Unit test for job queue
 ├── main.cpp                # Example usage and test driver
 ├── README.md               # Project documentation
 └── .gitignore              # Git ignored files
@@ -116,13 +132,13 @@ Then, visit: [http://localhost:8080/metrics](http://localhost:8080/metrics)
 | **Timeout Logic** | Terminates long-running jobs after N ms |
 | **Logging** | Structured, thread-aware logs with `spdlog` |
 | **Priority Scheduling** | Higher-priority jobs are executed first |
+| **Thread-safe Caching** | LRU cache to store computed results |
+| **Test Coverage** | LRUCache & JobQueue tested with Catch2 |
 
 ---
 
 ## Future Improvements
 
-- [ ] Add **thread-safe LRU cache** module for caching job results
-- [ ] Work stealing among worker threads
 - [ ] Setup **Docker + Prometheus + Grafana** observability stack
 - [ ] Add performance benchmarking with `std::chrono` or Google Benchmark
 
