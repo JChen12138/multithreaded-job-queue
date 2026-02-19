@@ -1,16 +1,18 @@
 # Thread Pool with Job Queue (C++17)
 
-A lightweight, modern **C++17 thread pool** implementation with a **thread-safe job queue**, **futures for result retrieval**, **Prometheus metrics**, and **graceful shutdown**.  
+A lightweight, modern **C++17 thread pool** implementation with a **thread-safe job queue**,  **retry & timeout support**, **futures for result retrieval**, **Prometheus metrics**, and **graceful shutdown**.  
 This project demonstrates core concepts of multithreading, synchronization, task scheduling, caching, and basic observability, all using modern C++ and open source tools.
 
 ---
 
-## Recent Additions (as of December 2025)
+## Recent Additions (as of February 2026)
 
-- **Thread-safe LRU Cache** module added for result memoization
-- **Unit tests for LRU Cache** with Catch2 framework
-- **Debug build setup verified**
-- **Unit tests for JobQueue** using Catch2
+- **Retry + unit test**: Added retry metadata (`allow_retry`, `max_retries`, `current_retry`) and a Catch2 test that verifies retries until success
+- **Debug fix (API semantics)**: Found a retry test failure caused by `submit()` overload semantics mutating metadata (retry accidentally disabled). Fixed by ensuring retry behavior is fully controlled by **JobMetadata**
+- **Priority scheduling**: JobQueue backed by `std::priority_queue` (min-heap behavior via comparator)
+- **Per-job timeout**: Optional timeout with logging; long-running jobs can be marked as timed out/cancelled
+- **More test coverage**: Edge-case tests (`test_edge_cases.cpp`) added alongside JobQueue and LRUCache tests
+- **Metrics build toggle**: Added `MetricsStub.hpp` for builds/tests that compile with `-D DISABLE_METRICS`
 
 ---
 
@@ -47,16 +49,18 @@ This project demonstrates core concepts of multithreading, synchronization, task
 │   ├── JobQueue.hpp        # Thread-safe queue for job storage
 │   ├── ThreadPool.hpp      # Core thread pool logic
 │   ├── LRUCache.hpp        # Thread-safe LRU cache module 
+│   ├── JobMetadata.hpp
+│   ├── MetricsStub.hpp  
 │   ├── Metrics.hpp         # Lightweight wrapper around prometheus-cpp
 │   └── MetricsServer.hpp   # Singleton exposer registry
 ├── src/
 │   ├── JobQueue.cpp
 │   ├── ThreadPool.cpp
-│   ├── LRUCache.cpp        # LRU cache implementation
 │   ├── Metrics.cpp
 │   └── MetricsServer.cpp
 ├── test/
 │   ├── test_LRUCache.cpp   # Unit test for LRU cache
+│   ├── test_edge_cases.cpp
 │   └── test_job_queue.cpp  # Unit test for job queue
 ├── main.cpp                # Example usage and test driver
 ├── README.md               # Project documentation
@@ -70,11 +74,13 @@ This project demonstrates core concepts of multithreading, synchronization, task
 ### Requirements
 - C++17-compatible compiler (GCC ≥ 9, Clang ≥ 10, or MSVC ≥ 2019)
 - [`vcpkg`](https://github.com/microsoft/vcpkg) with:
-  - `prometheus-cpp` (core + pull)
+  - `prometheus-cpp` (core + pull) *(optional if you build with `-D DISABLE_METRICS`)*
   - `spdlog`
   - `fmt`
   - `cxxopts` (for CLI)
   - `sqlite3`, `hiredis`, and `redis++` if enabled later
+  - Catch2 (for tests)
+
 
 ### Compile Example
 ```bash
@@ -87,6 +93,16 @@ g++ -std=c++17 -O2   -Iinclude   -IC:/path/to/vcpkg/installed/x64-mingw-static/i
 ```
 
 Then, visit: [http://localhost:8080/metrics](http://localhost:8080/metrics)
+
+### Run tests (example)
+Disable metrics for unit tests if you want a minimal link:
+```bash
+g++ -std=c++17 src/JobQueue.cpp src/ThreadPool.cpp test/test_edge_cases.cpp ^
+  -Iinclude ^
+  -I"C:/path/to/vcpkg/installed/x64-mingw-static/include" ^
+  -L"C:/path/to/vcpkg/installed/x64-mingw-static/lib" ^
+  -lCatch2 -lspdlog -lfmt -D DISABLE_METRICS -o test_edge_cases.exe
+```
 
 ---
 
@@ -133,7 +149,7 @@ Then, visit: [http://localhost:8080/metrics](http://localhost:8080/metrics)
 | **Logging** | Structured, thread-aware logs with `spdlog` |
 | **Priority Scheduling** | Higher-priority jobs are executed first |
 | **Thread-safe Caching** | LRU cache to store computed results |
-| **Test Coverage** | LRUCache & JobQueue tested with Catch2 |
+| **Test Coverage** | LRUCache & JobQueue & Edge cases tested with Catch2 |
 
 ---
 
@@ -174,16 +190,16 @@ MIT License © 2025 Weijia Chen
 │ └────────┬───────────────┘ │
 │          ▼                 │
 │     ┌────────────┐         │
-│     │  JobQueue  │ ◀─────── bounded, thread-safe, supports metadata
+│     │  JobQueue  │ ◀─────── bounded, thread-safe, metadata + priority
 │     └────────────┘         │
 │     ▲        │             │
 │     │        ▼             │
-│ Timeout  Retry Logic       │ ◀───── optional wrappers
+│ Timeout  Retry Logic       │ ◀───── optional behaviors driven by metadata
 └────────┬───────────────────┘
          │
          ▼
   ┌────────────┐
-  │ LRU Cache  │ ◀───── optionally queried before expensive jobs
+  │ LRU Cache  │ ◀───── memoize expensive results (header-only)
   └────────────┘
 
          │
