@@ -2,8 +2,6 @@
 #include <spdlog/spdlog.h>
 #include <thread>
 #include "formatters/thread_id_formatter.hpp"
-#include "Metrics.hpp"
-
 
 
 ThreadPool::ThreadPool(size_t num_threads, size_t max_queue_size) : job_queue_(max_queue_size), running_(true) {
@@ -20,6 +18,9 @@ ThreadPool::~ThreadPool() {
 }
 
 void ThreadPool::submit(JobMetadata&& metadata, std::function<void()> task) {
+    if (!running_) {
+        throw std::runtime_error("Cannot submit job: ThreadPool is shut down");
+    }
     spdlog::info("Job submitted: ID = {}, Name = {}", metadata.id, metadata.name);
     jobs_in_progress_++;
     job_queue_.push(JobQueue::Job(std::move(metadata), std::move(task)));
@@ -77,6 +78,7 @@ void ThreadPool::worker_loop() {
         }
 
         bool timed_out = false;
+        bool retried = false;
 
         try {
             auto start = std::chrono::steady_clock::now(); 
@@ -134,10 +136,17 @@ void ThreadPool::worker_loop() {
             spdlog::warn("Future error in job {} (ID {}): {}", job.metadata.name, job.metadata.id, e.what());
         } catch (const std::exception& ex) {
             spdlog::error("Job {} (ID: {}) failed: {}", job.metadata.name, job.metadata.id, ex.what());
+            spdlog::info("Retry check: allow_retry={}, cancel={}, cur={}, max={}",
+                job.metadata.allow_retry,
+                job.metadata.cancel_requested.load(),
+                job.metadata.current_retry,
+                job.metadata.max_retries);
+
             if (!job.metadata.cancel_requested && job.metadata.allow_retry && job.metadata.current_retry < job.metadata.max_retries) {
                     spdlog::warn("Retrying job {} (ID: {}) [attempt {}/{}]",job.metadata.name, job.metadata.id,
                     job.metadata.current_retry + 1, job.metadata.max_retries);
                 job.metadata.current_retry++;
+                retried = true;
                 job_queue_.push(std::move(job));
             } else if (job.metadata.allow_retry) {
                 spdlog::info("Job {} (ID: {}) not retried: timed_out={}, current_retry={}, max_retries={}",
@@ -149,13 +158,16 @@ void ThreadPool::worker_loop() {
             Metrics::instance().active_jobs().Decrement();
         }
 
-        jobs_in_progress_--;
-        if (jobs_in_progress_ == 0) {
-            std::unique_lock lock(done_mutex_);
-            cv_done_.notify_all();
+        if (!retried) {
+            jobs_in_progress_--;
+            if (jobs_in_progress_ == 0) {
+                std::unique_lock lock(done_mutex_);
+                cv_done_.notify_all();
+            }
         }
     }
 }
+
 
 
 

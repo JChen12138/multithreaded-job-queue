@@ -29,7 +29,9 @@ struct JobMetadata {
           timestamp(other.timestamp),
           max_retries(other.max_retries),
           current_retry(other.current_retry),
-          timeout(other.timeout) {
+          timeout(other.timeout),
+          allow_retry(other.allow_retry),
+          priority(other.priority) {
         cancel_requested.store(other.cancel_requested.load());
     }
 
@@ -42,6 +44,8 @@ struct JobMetadata {
             max_retries = other.max_retries;
             current_retry = other.current_retry;
             timeout = other.timeout;
+            allow_retry = other.allow_retry;
+            priority = other.priority; 
             cancel_requested.store(other.cancel_requested.load());
         }
         return *this;

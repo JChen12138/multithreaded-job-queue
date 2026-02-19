@@ -1,0 +1,177 @@
+#include <catch2/catch_all.hpp>
+#include "JobQueue.hpp"
+#include "ThreadPool.hpp"
+
+int main(int argc, char* argv[]) {
+    return Catch::Session().run(argc, argv);
+}
+
+TEST_CASE("try_pop returns false when queue is empty") {
+    JobQueue queue(10);
+    JobQueue::Job job;
+
+    REQUIRE(queue.try_pop(job) == false);
+}
+
+TEST_CASE("try_pop retrieves pushed job") {
+    JobQueue queue(10);
+
+    JobMetadata meta(1, "test");
+    bool executed = false;
+
+    queue.push({std::move(meta), [&] { executed = true; }});
+
+    JobQueue::Job job;
+    REQUIRE(queue.try_pop(job) == true);
+
+    job.task();
+    REQUIRE(executed == true);
+}
+
+
+TEST_CASE("bounded queue blocks when full and resumes after pop") {
+    JobQueue queue(1);
+
+    JobMetadata meta1(1, "first");
+    JobMetadata meta2(2, "second");
+
+    queue.push({std::move(meta1), []{}});
+
+    std::atomic<bool> second_pushed = false;
+
+    std::thread producer([&] {
+        queue.push({std::move(meta2), []{}});
+        second_pushed = true;
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    REQUIRE(second_pushed == false); // should still be blocked
+
+    JobQueue::Job job;
+    REQUIRE(queue.try_pop(job) == true);
+
+    producer.join();
+    REQUIRE(second_pushed == true);
+}
+
+TEST_CASE("push after shutdown does not add job") {
+    JobQueue queue(10);
+    queue.shutdown();
+
+    JobMetadata meta(1, "test");
+    queue.push({std::move(meta), []{}});
+
+    REQUIRE(queue.empty());
+}
+
+
+TEST_CASE("pop returns dummy job after shutdown and empty") {
+    JobQueue queue(10);
+    queue.shutdown();
+
+    auto job = queue.pop();
+
+    REQUIRE(job.metadata.id == -1);
+    REQUIRE(queue.empty());
+}
+
+TEST_CASE("threadpool completes submitted jobs before shutdown") {
+    ThreadPool pool(2, 10);
+
+    std::atomic<int> counter = 0;
+
+    for (int i = 0; i < 5; ++i) {
+        pool.submit(JobMetadata(i, "test"), [&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            counter++;
+        });
+    }
+
+    pool.shutdown(5);
+
+    REQUIRE(counter == 5);
+}
+
+TEST_CASE("shutdown is idempotent") {
+    ThreadPool pool(2, 10);
+
+    pool.shutdown();
+    pool.shutdown();
+    pool.shutdown();
+
+    REQUIRE_NOTHROW(pool.shutdown());
+}
+
+TEST_CASE("submit after shutdown throws") {
+    ThreadPool pool(2, 10);
+    pool.shutdown();
+
+    REQUIRE_THROWS_AS(
+        pool.submit(JobMetadata(1, "late"), []{}),
+        std::runtime_error
+    );
+}
+
+TEST_CASE("submit with future returns correct value") {
+    ThreadPool pool(2, 10);
+
+    auto future = pool.submit(
+        JobMetadata(1, "compute"),
+        [] { return 42; }
+    );
+
+    REQUIRE(future.get() == 42);
+
+    pool.shutdown();
+}
+
+TEST_CASE("submit with future void works") {
+    ThreadPool pool(2, 10);
+
+    auto future = pool.submit(
+        JobMetadata(1, "void"),
+        [] {}
+    );
+
+    REQUIRE_NOTHROW(future.get());
+
+    pool.shutdown();
+}
+
+TEST_CASE("job retries until success") {
+    ThreadPool pool(1, 10);
+
+    std::atomic<int> attempts = 0;
+
+    JobMetadata meta(1, "retry");
+    meta.allow_retry = true;
+    meta.max_retries = 3;
+
+    pool.submit(std::move(meta), [&] {
+        attempts++;
+        if (attempts < 3) {
+            throw std::runtime_error("fail");
+        }
+    });
+
+    pool.shutdown(5);
+
+    REQUIRE(attempts == 3);
+}
+
+TEST_CASE("job times out") {
+    ThreadPool pool(1, 10);
+
+    JobMetadata meta(1, "timeout");
+    meta.timeout = std::chrono::milliseconds(100);
+
+    pool.submit(std::move(meta), [] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    });
+
+    pool.shutdown(2);
+
+    SUCCEED();  // just ensure no crash or deadlock
+}
+
+

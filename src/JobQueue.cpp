@@ -38,6 +38,7 @@ bool JobQueue::try_pop(Job& job) {
     //job = std::move(queue_.front());
      job = std::move(const_cast<Job&>(queue_.top()));  
     queue_.pop();
+    not_full_cv_.notify_one();
     return true;
 }
 

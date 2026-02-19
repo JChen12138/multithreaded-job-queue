@@ -7,8 +7,11 @@
 #include <sstream>
 #include <future>
 #include <spdlog/spdlog.h>
+#ifdef DISABLE_METRICS
+#include "MetricsStub.hpp"
+#else
 #include "Metrics.hpp"
-
+#endif
 
 
 class ThreadPool {
@@ -18,9 +21,12 @@ public:
     void submit(JobMetadata&& metadata, std::function<void()> task);
     template<typename Func>
     auto submit(JobMetadata&& metadata, Func&& func) -> std::future<decltype(func())> {
+        if (!running_) {
+            throw std::runtime_error("Cannot submit job: ThreadPool is shut down");
+        }
         using ResultType = decltype(func());
 
-        metadata.allow_retry = false;
+        //metadata.allow_retry = false;
 
         auto promise = std::make_shared<std::promise<ResultType>>();
         auto future = promise->get_future();
@@ -42,6 +48,7 @@ public:
                 } catch (...) {
                     spdlog::warn("Failed to set exception on promise");
                 }
+                throw;
             }
         };
 
