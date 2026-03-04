@@ -1,11 +1,11 @@
 # Thread Pool with Job Queue (C++17)
 
-A lightweight, modern **C++17 thread pool** implementation with a **thread-safe job queue**,  **retry & timeout support**, **futures for result retrieval**, **Prometheus metrics**, and **graceful shutdown**.  
+A lightweight, modern **C++17 thread pool** implementation with a **thread-safe job queue**, **retry & timeout support**, **futures for result retrieval**, **Prometheus metrics**, and **graceful shutdown**.  
 This project demonstrates core concepts of multithreading, synchronization, task scheduling, caching, and basic observability, all using modern C++ and open source tools.
 
 ---
 
-## Recent Additions (as of February 2026)
+## Recent Additions (as of March 2026)
 
 - **Retry + unit test**: Added retry metadata (`allow_retry`, `max_retries`, `current_retry`) and a Catch2 test that verifies retries until success
 - **Debug fix (API semantics)**: Found a retry test failure caused by `submit()` overload semantics mutating metadata (retry accidentally disabled). Fixed by ensuring retry behavior is fully controlled by **JobMetadata**
@@ -13,6 +13,8 @@ This project demonstrates core concepts of multithreading, synchronization, task
 - **Per-job timeout**: Optional timeout with logging; long-running jobs can be marked as timed out/cancelled
 - **More test coverage**: Edge-case tests (`test_edge_cases.cpp`) added alongside JobQueue and LRUCache tests
 - **Metrics build toggle**: Added `MetricsStub.hpp` for builds/tests that compile with `-D DISABLE_METRICS`
+- **Blocking worker queue path**: `ThreadPool` workers now use blocking `pop()` instead of `try_pop()` + `yield()` to avoid busy-waiting while idle
+- **Retry/future correctness fix**: Future-returning jobs now preserve a single logical promise outcome across retries, so intermediate failures do not prematurely satisfy the promise
 
 ---
 
@@ -23,7 +25,7 @@ This project demonstrates core concepts of multithreading, synchronization, task
 - `submit()` API supporting **any callable** (lambda, function, functor)
 - Supports **return values via `std::future`**
 - Tracks active jobs using atomic counters
-- **Graceful shutdown** that waits for all jobs to finish
+- **Graceful shutdown** that waits for outstanding work, then stops workers cleanly
 - Integrated **logging** using [`spdlog`](https://github.com/gabime/spdlog)
 - Clean, modern C++17 syntax with RAII and move semantics
 - Built-in **retry mechanism** with metadata (job ID, name, retries)
@@ -43,28 +45,29 @@ This project demonstrates core concepts of multithreading, synchronization, task
 
 ## Project Structure
 
-```
+```text
 .
-├── include/
-│   ├── JobQueue.hpp        # Thread-safe queue for job storage
-│   ├── ThreadPool.hpp      # Core thread pool logic
-│   ├── LRUCache.hpp        # Thread-safe LRU cache module 
-│   ├── JobMetadata.hpp
-│   ├── MetricsStub.hpp  
-│   ├── Metrics.hpp         # Lightweight wrapper around prometheus-cpp
-│   └── MetricsServer.hpp   # Singleton exposer registry
-├── src/
-│   ├── JobQueue.cpp
-│   ├── ThreadPool.cpp
-│   ├── Metrics.cpp
-│   └── MetricsServer.cpp
-├── test/
-│   ├── test_LRUCache.cpp   # Unit test for LRU cache
-│   ├── test_edge_cases.cpp
-│   └── test_job_queue.cpp  # Unit test for job queue
-├── main.cpp                # Example usage and test driver
-├── README.md               # Project documentation
-└── .gitignore              # Git ignored files
+|-- include/
+|   |-- JobQueue.hpp        # Thread-safe queue for job storage
+|   |-- ThreadPool.hpp      # Core thread pool logic
+|   |-- LRUCache.hpp        # Thread-safe LRU cache module
+|   |-- JobMetadata.hpp
+|   |-- MetricsStub.hpp
+|   |-- Metrics.hpp         # Lightweight wrapper around prometheus-cpp
+|   `-- MetricsServer.hpp   # Singleton exposer registry
+|-- src/
+|   |-- JobQueue.cpp
+|   |-- ThreadPool.cpp
+|   |-- Metrics.cpp
+|   `-- MetricsServer.cpp
+|-- test/
+|   |-- test_LRUCache.cpp   # Unit test for LRU cache
+|   |-- test_edge_cases.cpp
+|   `-- test_job_queue.cpp  # Unit test for job queue
+|-- main.cpp                # Example usage and test driver
+|-- bench.cpp               # Stress / benchmarking driver
+|-- README.md               # Project documentation
+`-- .gitignore              # Git ignored files
 ```
 
 ---
@@ -72,7 +75,7 @@ This project demonstrates core concepts of multithreading, synchronization, task
 ## Build Instructions
 
 ### Requirements
-- C++17-compatible compiler (GCC ≥ 9, Clang ≥ 10, or MSVC ≥ 2019)
+- C++17-compatible compiler (GCC >= 9, Clang >= 10, or MSVC >= 2019)
 - [`vcpkg`](https://github.com/microsoft/vcpkg) with:
   - `prometheus-cpp` (core + pull) *(optional if you build with `-D DISABLE_METRICS`)*
   - `spdlog`
@@ -81,10 +84,9 @@ This project demonstrates core concepts of multithreading, synchronization, task
   - `sqlite3`, `hiredis`, and `redis++` if enabled later
   - Catch2 (for tests)
 
-
 ### Compile Example
 ```bash
-g++ -std=c++17 -O2   -Iinclude   -IC:/path/to/vcpkg/installed/x64-mingw-static/include   -LC:/path/to/vcpkg/installed/x64-mingw-static/lib   main.cpp src/*.cpp -o server.exe   -static -lspdlog -lfmt -lprometheus-cpp-core -lprometheus-cpp-pull -lws2_32 -lmswsock
+g++ -std=c++17 -O2 -Iinclude -IC:/path/to/vcpkg/installed/x64-mingw-static/include -LC:/path/to/vcpkg/installed/x64-mingw-static/lib main.cpp src/*.cpp -o server.exe -static -lspdlog -lfmt -lprometheus-cpp-core -lprometheus-cpp-pull -lws2_32 -lmswsock
 ```
 
 ### Run
@@ -127,6 +129,7 @@ g++ -std=c++17 src/JobQueue.cpp src/ThreadPool.cpp test/test_edge_cases.cpp ^
 - `submit_phase_ms` is not pure enqueue overhead: with a bounded queue, producers can block in `push()` while workers are already executing jobs.
 - `post_submit_wait_ms` measures only the remaining time after submission finishes and before `shutdown()` returns.
 - Very short sleep-based workloads, especially microsecond sleeps on Windows, are scheduler/timer limited and should be treated as illustrative rather than authoritative.
+- The worker pool uses blocking `pop()`, so benchmark behavior reflects condition-variable wakeups rather than busy-polling workers.
 
 ---
 
@@ -149,10 +152,10 @@ g++ -std=c++17 src/JobQueue.cpp src/ThreadPool.cpp test/test_edge_cases.cpp ^
 | **Condition Variables** | Efficiently wait for new jobs without busy-waiting |
 | **Mutexes** | Protect shared queue access |
 | **Atomic Counters** | Safely track active jobs across threads |
-| **Futures / Packaged Tasks** | Retrieve results of async jobs |
-| **Graceful Shutdown** | Waits for all jobs to finish or timeout |
-| **Retry Mechanism** | Automatically re-enqueue jobs on failure |
-| **Timeout Logic** | Terminates long-running jobs after N ms |
+| **Futures / Packaged Tasks** | Retrieve async results and coordinate timeout waiting |
+| **Graceful Shutdown** | Waits for outstanding work, wakes blocked queue users, and joins worker threads |
+| **Retry Mechanism** | Re-enqueues failed jobs while preserving one final `future` outcome per logical job |
+| **Timeout Logic** | Detects long-running jobs after N ms and marks them timed out/cancelled |
 | **Logging** | Structured, thread-aware logs with `spdlog` |
 | **Priority Scheduling** | Higher-priority jobs are executed first |
 | **Thread-safe Caching** | LRU cache to store computed results |
@@ -180,82 +183,55 @@ This project was built as part of a hands-on learning path to strengthen underst
 
 MIT License © 2025 Weijia Chen
 
-
 ## System Architecture
 
-```
-┌──────────────┐
-│  Main Thread │ ◀──── CLI options, job submission, shutdown
-└──────┬───────┘
-       │
-       ▼
-┌────────────────────────────┐
-│        ThreadPool          │ ◀───── submit() API
-│ ┌────────────────────────┐ │
-│ │      Worker Threads    │ │ ◀───── std::thread pool
-│ │  (loop + wait + exec)  │ │
-│ └────────┬───────────────┘ │
-│          ▼                 │
-│     ┌────────────┐         │
-│     │  JobQueue  │ ◀─────── bounded, thread-safe, metadata + priority
-│     └────────────┘         │
-│     ▲        │             │
-│     │        ▼             │
-│ Timeout  Retry Logic       │ ◀───── optional behaviors driven by metadata
-└────────┬───────────────────┘
-         │
-         ▼
-  ┌────────────┐
-  │ LRU Cache  │ ◀───── memoize expensive results (header-only)
-  └────────────┘
+```text
+Main Thread
+  -> CLI options, job submission, shutdown
 
-         │
-         ▼
-  ┌────────────────────┐
-  │  Metrics Server    │ ◀──── prometheus-cpp + Exposer
-  └────────────────────┘
-         ▲
-         │
- Exposes /metrics endpoint
+ThreadPool
+  -> submit() API
+  -> worker threads
+  -> shutdown coordination
+
+JobQueue
+  -> bounded, thread-safe, metadata + priority
+
+Retry / Timeout Logic
+  -> optional behaviors driven by metadata
+
+LRU Cache
+  -> independent memoization component
+
+Metrics Server
+  -> exposes /metrics endpoint
 ```
 
 ## Three-Layer Architecture
 
-```
-┌────────────────────────────────────────────────────────────────────┐
-│ Layer 1: Submit (Producer API)                                      │
-│  ThreadPool::submit(...)                                            │
-│   - stop flag: ThreadPool::running_ (std::atomic<bool>)             │
-│   - jobs_in_progress_++                                             │
-│   - enqueue JobQueue::Job{metadata, task}                           │
-└───────────────┬────────────────────────────────────────────────────┘
-                │
-                ▼
-┌────────────────────────────────────────────────────────────────────┐
-│ Layer 2: Queue (Bounded + Priority)                                 │
-│  JobQueue                                                           │
-│   - container: std::priority_queue<Job> queue_  (min-heap by prio)   │
-│   - mutex: JobQueue::mutex_                                         │
-│   - CVs:   JobQueue::not_full_cv_  (push waits when full)           │
-│           JobQueue::not_empty_cv_ (pop waits when empty)            │
-│   - stop flag: JobQueue::shutdown_ (guarded by mutex_)              │
-│                                                                     │
-│  push(): lock(mutex_) → wait(not_full_cv_) → queue_.push → notify   │
-│  pop():  lock(mutex_) → wait(not_empty_cv_) → pop → notify          │
-│  shutdown(): set shutdown_=true → not_empty_cv_.notify_all()        │
-└───────────────┬────────────────────────────────────────────────────┘
-                │
-                ▼
-┌────────────────────────────────────────────────────────────────────┐
-│ Layer 3: Worker (Execution)                                         │
-│  ThreadPool::worker_loop()                                          │
-│   - loop stop flag: ThreadPool::running_                            │
-│   - pulls jobs via job_queue_.try_pop(...) + std::this_thread::yield │
-│   - per-job cancel: JobMetadata::cancel_requested                    │
-│   - per-job timeout: JobMetadata::timeout                            │
-│   - retry: allow_retry/current_retry/max_retries                     │
-│   - shutdown wait: cv_done_ + done_mutex_ (wait jobs_in_progress_=0) │
-└────────────────────────────────────────────────────────────────────┘
+```text
+Layer 1: Submit (Producer API)
+  ThreadPool::submit(...)
+  - stop flag: ThreadPool::running_
+  - jobs_in_progress_++
+  - enqueue JobQueue::Job{metadata, task}
+  - future-based submit wraps the callable with a promise/future pair
+
+Layer 2: Queue (Bounded + Priority)
+  JobQueue
+  - container: std::priority_queue<Job> queue_ (min-heap by priority)
+  - mutex: JobQueue::mutex_
+  - not_full_cv_: producers wait when the queue is full
+  - not_empty_cv_: consumers wait when the queue is empty
+  - shutdown_: closes the queue and wakes blocked queue users
+
+Layer 3: Worker (Execution)
+  ThreadPool::worker_loop()
+  - blocks on job_queue_.pop()
+  - per-job cancel: JobMetadata::cancel_requested
+  - per-job timeout: JobMetadata::timeout
+  - retry: allow_retry/current_retry/max_retries
+  - shutdown wait: cv_done_ + done_mutex_
 
 LRUCache is independent (mutex only), not part of the core queue pipeline.
 ```
@@ -264,12 +240,14 @@ LRUCache is independent (mutex only), not part of the core queue pipeline.
 
 ## Execution Flow Overview
 
-This project follows a simple **three-layer pipeline**: **Submit → Queue → Worker**.
+This project follows a simple **three-layer pipeline**: **Submit -> Queue -> Worker**.
 
 1) **Submit (Producer)**
 - The main thread calls `ThreadPool::submit(...)`.
 - `submit()` first checks the pool-level stop flag `running_`.
-- The task is wrapped (future-based submit uses a `std::promise`) and pushed into the shared `JobQueue`.
+- The task is wrapped and pushed into the shared `JobQueue`.
+- Future-based submit uses a `std::promise`.
+- If retries are enabled, intermediate failures do not complete the promise; the `future` reflects the final logical outcome.
 - `jobs_in_progress_` is incremented so shutdown can wait for outstanding work.
 
 2) **Queue (Bounded + Priority Scheduling)**
@@ -278,17 +256,17 @@ This project follows a simple **three-layer pipeline**: **Submit → Queue → W
 - The queue supports backpressure with condition variables:
   - `not_full_cv_`: producers block in `push()` when the queue is full
   - `not_empty_cv_`: consumers block in `pop()` when the queue is empty
-- Shutdown sets `JobQueue::shutdown_` and broadcasts `not_empty_cv_` to wake sleeping consumers.
+- Shutdown sets `JobQueue::shutdown_` and wakes blocked consumers and producers so they can observe shutdown and exit cleanly.
 
 3) **Worker (Execution + Retry/Timeout)**
-- Each worker runs `ThreadPool::worker_loop()` until `running_` becomes false and the queue drains.
-- Workers pull jobs from the queue, execute them, and update metrics.
+- Each worker runs `ThreadPool::worker_loop()` by blocking on `JobQueue::pop()`.
+- Workers pull jobs from the queue, execute them, and update metrics without busy-waiting while idle.
 - Optional behaviors are metadata-driven:
   - **Timeout**: jobs with `metadata.timeout > 0` are treated as time-limited
   - **Retry**: on exception, jobs may be re-enqueued if `allow_retry` and retry budget remains
   - **Cancel**: `cancel_requested` can prevent execution
 - On completion (or final failure), `jobs_in_progress_` is decremented. When it reaches 0, workers notify `cv_done_` so `shutdown()` can proceed.
 
-> Note: workers currently use `try_pop()` + `yield()`, so the queue's blocking `pop()` path is not yet used by the pool. This keeps the control flow simple, but a production-oriented revision would typically switch workers to blocking `pop()` to avoid busy-waiting and make condition-variable wakeups central to idle behavior.
+> Note: timed-out jobs are marked as cancelled/timed out, but the current implementation does not forcibly stop the underlying running thread. True cancellation would require cooperative task cancellation.
 
 ---

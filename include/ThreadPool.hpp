@@ -30,9 +30,10 @@ public:
 
         auto promise = std::make_shared<std::promise<ResultType>>();
         auto future = promise->get_future();
+        auto retries_left = std::make_shared<std::atomic<int>>(metadata.allow_retry ? metadata.max_retries : 0);
         //Caller gets a future. ThreadPool keeps the promise.
 
-        std::function<void()> wrapper = [promise, f = std::forward<Func>(func)]() mutable {
+        std::function<void()> wrapper = [promise, retries_left, f = std::forward<Func>(func)]() mutable {
             try {
                 if constexpr (std::is_void_v<ResultType>) {
                     f();
@@ -44,6 +45,19 @@ public:
             } catch (const std::future_error& e) {
                 spdlog::warn("Promise already fulfilled or invalid: {}", e.what());
             } catch (...) {
+                // Previous behavior kept for reference:
+                // try {
+                //     promise->set_exception(std::current_exception());
+                // } catch (...) {
+                //     spdlog::warn("Failed to set exception on promise");
+                // }
+                // throw;
+
+                if (retries_left->load() > 0) {
+                    retries_left->fetch_sub(1);//atomic decrement operation
+                    throw;
+                }
+
                 try {
                     promise->set_exception(std::current_exception());
                 } catch (...) {

@@ -53,6 +53,8 @@ void JobQueue::shutdown() {
         shutdown_ = true;
     }
     not_empty_cv_.notify_all();
+    not_full_cv_.notify_all();
+
 }
 
 bool JobQueue::is_shutdown() {

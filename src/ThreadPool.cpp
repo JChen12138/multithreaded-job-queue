@@ -47,7 +47,7 @@ void ThreadPool::shutdown(int timeout_seconds) {
 
     for (auto& worker : workers_) {
         if (worker.joinable()) {
-            worker.join();
+            worker.join();//block here until that thread finishes
         }
     }
     spdlog::info("Shutdown complete.");
@@ -58,12 +58,19 @@ void ThreadPool::shutdown(int timeout_seconds) {
 
 
 void ThreadPool::worker_loop() {
-    while (running_ || !job_queue_.empty()) {
-        JobQueue::Job job;
-        if (!job_queue_.try_pop(job)) {
-            std::this_thread::yield();
-            continue;
+    while (true) {
+        JobQueue::Job job = job_queue_.pop();
+        if (job_queue_.is_shutdown() && job.metadata.id == -1) {
+            break;
         }
+
+        // Previous non-blocking worker path kept for reference:
+        // while (running_ || !job_queue_.empty()) {
+        //     JobQueue::Job job;
+        //     if (!job_queue_.try_pop(job)) {
+        //         std::this_thread::yield();
+        //         continue;
+        //     }
 
         spdlog::info("Running job ID = {}, Name = {}, on thread {}",
                      job.metadata.id, job.metadata.name, std::this_thread::get_id());
