@@ -121,6 +121,13 @@ g++ -std=c++17 src/JobQueue.cpp src/ThreadPool.cpp test/test_edge_cases.cpp ^
 [info] Shutdown complete.
 ```
 
+## Benchmark Notes
+
+- `bench.cpp` reports `total_end_to_end_ms` as the primary throughput metric.
+- `submit_phase_ms` is not pure enqueue overhead: with a bounded queue, producers can block in `push()` while workers are already executing jobs.
+- `post_submit_wait_ms` measures only the remaining time after submission finishes and before `shutdown()` returns.
+- Very short sleep-based workloads, especially microsecond sleeps on Windows, are scheduler/timer limited and should be treated as illustrative rather than authoritative.
+
 ---
 
 ## Metrics Overview
@@ -174,7 +181,7 @@ This project was built as part of a hands-on learning path to strengthen underst
 MIT License © 2025 Weijia Chen
 
 
-## System Architecturex
+## System Architecture
 
 ```
 ┌──────────────┐
@@ -211,3 +218,77 @@ MIT License © 2025 Weijia Chen
          │
  Exposes /metrics endpoint
 ```
+
+## Three-Layer Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│ Layer 1: Submit (Producer API)                                      │
+│  ThreadPool::submit(...)                                            │
+│   - stop flag: ThreadPool::running_ (std::atomic<bool>)             │
+│   - jobs_in_progress_++                                             │
+│   - enqueue JobQueue::Job{metadata, task}                           │
+└───────────────┬────────────────────────────────────────────────────┘
+                │
+                ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ Layer 2: Queue (Bounded + Priority)                                 │
+│  JobQueue                                                           │
+│   - container: std::priority_queue<Job> queue_  (min-heap by prio)   │
+│   - mutex: JobQueue::mutex_                                         │
+│   - CVs:   JobQueue::not_full_cv_  (push waits when full)           │
+│           JobQueue::not_empty_cv_ (pop waits when empty)            │
+│   - stop flag: JobQueue::shutdown_ (guarded by mutex_)              │
+│                                                                     │
+│  push(): lock(mutex_) → wait(not_full_cv_) → queue_.push → notify   │
+│  pop():  lock(mutex_) → wait(not_empty_cv_) → pop → notify          │
+│  shutdown(): set shutdown_=true → not_empty_cv_.notify_all()        │
+└───────────────┬────────────────────────────────────────────────────┘
+                │
+                ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ Layer 3: Worker (Execution)                                         │
+│  ThreadPool::worker_loop()                                          │
+│   - loop stop flag: ThreadPool::running_                            │
+│   - pulls jobs via job_queue_.try_pop(...) + std::this_thread::yield │
+│   - per-job cancel: JobMetadata::cancel_requested                    │
+│   - per-job timeout: JobMetadata::timeout                            │
+│   - retry: allow_retry/current_retry/max_retries                     │
+│   - shutdown wait: cv_done_ + done_mutex_ (wait jobs_in_progress_=0) │
+└────────────────────────────────────────────────────────────────────┘
+
+LRUCache is independent (mutex only), not part of the core queue pipeline.
+```
+
+---
+
+## Execution Flow Overview
+
+This project follows a simple **three-layer pipeline**: **Submit → Queue → Worker**.
+
+1) **Submit (Producer)**
+- The main thread calls `ThreadPool::submit(...)`.
+- `submit()` first checks the pool-level stop flag `running_`.
+- The task is wrapped (future-based submit uses a `std::promise`) and pushed into the shared `JobQueue`.
+- `jobs_in_progress_` is incremented so shutdown can wait for outstanding work.
+
+2) **Queue (Bounded + Priority Scheduling)**
+- `JobQueue` owns the shared container `std::priority_queue<Job>` (lower `priority` value runs first).
+- Queue access is protected by `JobQueue::mutex_`.
+- The queue supports backpressure with condition variables:
+  - `not_full_cv_`: producers block in `push()` when the queue is full
+  - `not_empty_cv_`: consumers block in `pop()` when the queue is empty
+- Shutdown sets `JobQueue::shutdown_` and broadcasts `not_empty_cv_` to wake sleeping consumers.
+
+3) **Worker (Execution + Retry/Timeout)**
+- Each worker runs `ThreadPool::worker_loop()` until `running_` becomes false and the queue drains.
+- Workers pull jobs from the queue, execute them, and update metrics.
+- Optional behaviors are metadata-driven:
+  - **Timeout**: jobs with `metadata.timeout > 0` are treated as time-limited
+  - **Retry**: on exception, jobs may be re-enqueued if `allow_retry` and retry budget remains
+  - **Cancel**: `cancel_requested` can prevent execution
+- On completion (or final failure), `jobs_in_progress_` is decremented. When it reaches 0, workers notify `cv_done_` so `shutdown()` can proceed.
+
+> Note: workers currently use `try_pop()` + `yield()`, so the queue's blocking `pop()` path is not yet used by the pool. This keeps the control flow simple, but a production-oriented revision would typically switch workers to blocking `pop()` to avoid busy-waiting and make condition-variable wakeups central to idle behavior.
+
+---

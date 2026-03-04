@@ -30,6 +30,7 @@ public:
 
         auto promise = std::make_shared<std::promise<ResultType>>();
         auto future = promise->get_future();
+        //Caller gets a future. ThreadPool keeps the promise.
 
         std::function<void()> wrapper = [promise, f = std::forward<Func>(func)]() mutable {
             try {
@@ -38,7 +39,7 @@ public:
                     promise->set_value();
                 } else {
                     auto result = f();
-                    promise->set_value(result);
+                    promise->set_value(result);//sets the result.
                 }
             } catch (const std::future_error& e) {
                 spdlog::warn("Promise already fulfilled or invalid: {}", e.what());

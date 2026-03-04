@@ -93,10 +93,10 @@ void ThreadPool::worker_loop() {
                     }
                 });
                 auto future = wrapper_task.get_future();
-                std::thread worker(std::move(wrapper_task));
+                std::thread worker(std::move(wrapper_task));//Thread creation happens
 
                 // Wait for the task to finish or timeout
-                if (future.wait_for(job.metadata.timeout) == std::future_status::timeout) {
+                if (future.wait_for(job.metadata.timeout) == std::future_status::timeout) {//Blocks current thread Waits until: Task finishes → returns ready or Time expires → returns timeout
                     job.metadata.cancel_requested = true;
                     timed_out = true;
                     spdlog::warn("Job {} (ID: {}) timed out after {}ms",

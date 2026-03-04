@@ -134,7 +134,7 @@ int main(int argc, char* argv[]) {\
         std::string name_copy = metadata.name;
         int id_copy = metadata.id;
 
-        auto future = pool.submit(std::move(metadata), [name = std::move(name_copy), id = id_copy, cache_key]() {
+        auto future = pool.submit(std::move(metadata), [name = std::move(name_copy), id = id_copy, cache_key]() {//Caller submits job
             spdlog::info("Executing job: {} (ID: {})", name, id);
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             int result = 42;
@@ -144,7 +144,7 @@ int main(int argc, char* argv[]) {\
         });
 
         spdlog::info("Waiting for result...");
-        int result_value = future.get();
+        int result_value = future.get();//If result not ready->future blocks; When promise sets value-> future unblocks and returns result
         spdlog::info("Result received: {}", result_value);
     }
 

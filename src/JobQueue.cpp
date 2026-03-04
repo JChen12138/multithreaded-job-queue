@@ -4,7 +4,7 @@
 JobQueue::JobQueue(size_t max_size)
     : max_queue_size_(max_size) {}
 
-void JobQueue::push(Job job) {
+void JobQueue::push(Job job) { // pushing A Job struct(contains: metadata, std::function<void()> task, NOT a thread, just a function object stored in memory.
     std::unique_lock<std::mutex> lock(mutex_);
     not_full_cv_.wait(lock, [this]() {
         return queue_.size() < max_queue_size_ || shutdown_;
