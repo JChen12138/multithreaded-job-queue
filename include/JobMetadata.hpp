@@ -8,6 +8,7 @@ struct JobMetadata {
     int id = -1;
     std::string name;
     std::chrono::system_clock::time_point timestamp;
+    std::chrono::steady_clock::time_point enqueue_time;
     int max_retries = 0;
     int current_retry = 0;
     std::chrono::milliseconds timeout = std::chrono::milliseconds(0); // 0 = no timeout
@@ -20,6 +21,7 @@ struct JobMetadata {
     JobMetadata(int id_, std::string name_, int max_retries_ = 0)
         : id(id_), name(std::move(name_)),
           timestamp(std::chrono::system_clock::now()),
+          enqueue_time(std::chrono::steady_clock::now()),
           max_retries(max_retries_) {}
 
     // --- Custom Move Constructor ---
@@ -27,6 +29,7 @@ struct JobMetadata {
         : id(other.id),
           name(std::move(other.name)),
           timestamp(other.timestamp),
+          enqueue_time(other.enqueue_time),
           max_retries(other.max_retries),
           current_retry(other.current_retry),
           timeout(other.timeout),
@@ -41,6 +44,7 @@ struct JobMetadata {
             id = other.id;
             name = std::move(other.name);
             timestamp = other.timestamp;
+            enqueue_time = other.enqueue_time;
             max_retries = other.max_retries;
             current_retry = other.current_retry;
             timeout = other.timeout;

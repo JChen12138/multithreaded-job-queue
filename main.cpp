@@ -23,7 +23,7 @@ int main(int argc, char* argv[]) {\
         ("t,threads", "Number of threads", cxxopts::value<int>()->default_value("4"))
         ("q,max_queue", "Max queue size", cxxopts::value<int>()->default_value("100"))
         ("test_retry", "Enable test retry jobs")
-        ("timeout", "Shutdown timeout in seconds", cxxopts::value<int>()->default_value("5"))
+        ("timeout", "Graceful shutdown wait budget in seconds", cxxopts::value<int>()->default_value("5"))
         ("job_timeout", "Per-job timeout in milliseconds", cxxopts::value<int>()->default_value("0")) 
         ("h,help", "Print usage");
 

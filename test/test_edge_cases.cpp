@@ -159,11 +159,11 @@ TEST_CASE("job retries until success") {
     REQUIRE(attempts == 3);
 }
 
-TEST_CASE("job times out") {
+TEST_CASE("running job is allowed to finish even if timeout budget is smaller") {
     ThreadPool pool(1, 10);
 
     JobMetadata meta(1, "timeout");
-    meta.timeout = std::chrono::milliseconds(100);
+    meta.timeout = std::chrono::milliseconds(50);
 
     pool.submit(std::move(meta), [] {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -172,6 +172,39 @@ TEST_CASE("job times out") {
     pool.shutdown(2);
 
     SUCCEED();  // just ensure no crash or deadlock
+}
+
+TEST_CASE("expired job is skipped before execution") {
+    ThreadPool pool(1, 10);
+
+    std::atomic<bool> blocker_started = false;
+    std::atomic<bool> allow_blocker_exit = false;
+    std::atomic<bool> expired_executed = false;
+
+    pool.submit(JobMetadata(1, "blocker"), [&] {
+        blocker_started = true;
+        while (!allow_blocker_exit.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+
+    while (!blocker_started.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    JobMetadata expiring(2, "expires");
+    expiring.timeout = std::chrono::milliseconds(20);
+
+    pool.submit(std::move(expiring), [&] {
+        expired_executed = true;
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    allow_blocker_exit = true;
+
+    pool.shutdown(2);
+
+    REQUIRE(expired_executed == false);
 }
 
 
