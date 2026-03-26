@@ -19,7 +19,7 @@ TEST_CASE("try_pop retrieves pushed job") {
     JobMetadata meta(1, "test");
     bool executed = false;
 
-    queue.push({std::move(meta), [&] { executed = true; }});
+    REQUIRE(queue.push({std::move(meta), [&] { executed = true; }}) == true);
 
     JobQueue::Job job;
     REQUIRE(queue.try_pop(job) == true);
@@ -35,13 +35,12 @@ TEST_CASE("bounded queue blocks when full and resumes after pop") {
     JobMetadata meta1(1, "first");
     JobMetadata meta2(2, "second");
 
-    queue.push({std::move(meta1), []{}});
+    REQUIRE(queue.push({std::move(meta1), []{}}) == true);
 
     std::atomic<bool> second_pushed = false;
 
     std::thread producer([&] {
-        queue.push({std::move(meta2), []{}});
-        second_pushed = true;
+        second_pushed = queue.push({std::move(meta2), []{}});
     });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -59,7 +58,7 @@ TEST_CASE("push after shutdown does not add job") {
     queue.shutdown();
 
     JobMetadata meta(1, "test");
-    queue.push({std::move(meta), []{}});
+    REQUIRE(queue.push({std::move(meta), []{}}) == false);
 
     REQUIRE(queue.empty());
 }
@@ -205,6 +204,38 @@ TEST_CASE("expired job is skipped before execution") {
     pool.shutdown(2);
 
     REQUIRE(expired_executed == false);
+}
+
+TEST_CASE("expired future job completes with exception") {
+    ThreadPool pool(1, 10);
+
+    std::atomic<bool> blocker_started = false;
+    std::atomic<bool> allow_blocker_exit = false;
+
+    pool.submit(JobMetadata(1, "blocker"), [&] {
+        blocker_started = true;
+        while (!allow_blocker_exit.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+
+    while (!blocker_started.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    JobMetadata expiring(2, "expires_future");
+    expiring.timeout = std::chrono::milliseconds(20);
+
+    auto future = pool.submit(std::move(expiring), []() -> int {
+        return 42;
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    allow_blocker_exit = true;
+
+    pool.shutdown(2);
+
+    REQUIRE_THROWS_AS(future.get(), std::runtime_error);
 }
 
 

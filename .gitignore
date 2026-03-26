@@ -3,7 +3,6 @@
 
 # CMake and build artifacts
 /build/
-CMakeLists.txt
 
 # Visual Studio / VSCode
 .vscode/

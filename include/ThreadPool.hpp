@@ -6,6 +6,8 @@
 #include "JobQueue.hpp"
 #include <sstream>
 #include <future>
+#include <stdexcept>
+#include <type_traits>
 #include <spdlog/spdlog.h>
 #ifdef DISABLE_METRICS
 #include "MetricsStub.hpp"
@@ -33,6 +35,10 @@ public:
         auto retries_left = std::make_shared<std::atomic<int>>(metadata.allow_retry ? metadata.max_retries : 0);
         //Caller gets a future. ThreadPool keeps the promise.
 
+        auto failure_handler = [promise](std::exception_ptr ex) {
+            promise->set_exception(std::move(ex));
+        };
+
         std::function<void()> wrapper = [promise, retries_left, f = std::forward<Func>(func)]() mutable {
             try {
                 if constexpr (std::is_void_v<ResultType>) {
@@ -45,23 +51,8 @@ public:
             } catch (const std::future_error& e) {
                 spdlog::warn("Promise already fulfilled or invalid: {}", e.what());
             } catch (...) {
-                // Previous behavior kept for reference:
-                // try {
-                //     promise->set_exception(std::current_exception());
-                // } catch (...) {
-                //     spdlog::warn("Failed to set exception on promise");
-                // }
-                // throw;
-
                 if (retries_left->load() > 0) {
                     retries_left->fetch_sub(1);//atomic decrement operation
-                    throw;
-                }
-
-                try {
-                    promise->set_exception(std::current_exception());
-                } catch (...) {
-                    spdlog::warn("Failed to set exception on promise");
                 }
                 throw;
             }
@@ -69,7 +60,10 @@ public:
 
         //DIRECTLY enqueue the job instead of calling another submit()
         jobs_in_progress_++;
-        job_queue_.push(JobQueue::Job(std::move(metadata), std::move(wrapper)));
+        if (!job_queue_.push(JobQueue::Job(std::move(metadata), std::move(wrapper), std::move(failure_handler)))) {
+            jobs_in_progress_--;
+            throw std::runtime_error("Cannot submit job: queue rejected enqueue during shutdown");
+        }
         Metrics::instance().job_submitted().Increment();
         Metrics::instance().active_jobs().Increment();
 
@@ -81,6 +75,8 @@ public:
 
 private:
     void worker_loop(); // Worker thread function
+    void complete_terminal_failure(JobQueue::Job& job, std::exception_ptr ex);
+    void notify_job_finished();
 
     std::vector<std::thread> workers_;
     JobQueue job_queue_;

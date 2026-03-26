@@ -1,7 +1,14 @@
 #include "ThreadPool.hpp"
+#include <exception>
 #include <spdlog/spdlog.h>
 #include <thread>
 #include "formatters/thread_id_formatter.hpp"
+
+namespace {
+std::exception_ptr make_runtime_exception_ptr(const char* message) {
+    return std::make_exception_ptr(std::runtime_error(message));
+}
+}
 
 ThreadPool::ThreadPool(size_t num_threads, size_t max_queue_size): job_queue_(max_queue_size), running_(true) {
     for (size_t i = 0; i < num_threads; ++i) {
@@ -22,7 +29,10 @@ void ThreadPool::submit(JobMetadata&& metadata, std::function<void()> task) {
     }
     spdlog::info("Job submitted: ID = {}, Name = {}", metadata.id, metadata.name);
     jobs_in_progress_++;
-    job_queue_.push(JobQueue::Job(std::move(metadata), std::move(task)));
+    if (!job_queue_.push(JobQueue::Job(std::move(metadata), std::move(task)))) {
+        jobs_in_progress_--;
+        throw std::runtime_error("Cannot submit job: queue rejected enqueue during shutdown");
+    }
     Metrics::instance().job_submitted().Increment();
     Metrics::instance().active_jobs().Increment();
 }
@@ -70,9 +80,10 @@ void ThreadPool::worker_loop() {
         if (job.metadata.cancel_requested) {
             spdlog::warn("Job {} (ID: {}) cancelled before execution",
                          job.metadata.name, job.metadata.id);
+            complete_terminal_failure(job, make_runtime_exception_ptr("Job cancelled before execution"));
             Metrics::instance().job_failed().Increment();
             Metrics::instance().active_jobs().Decrement();
-            jobs_in_progress_--;
+            notify_job_finished();
             continue;
         }
 
@@ -88,6 +99,7 @@ void ThreadPool::worker_loop() {
                     timed_out = true;
                     spdlog::warn("Job {} (ID: {}) expired before execution after waiting {}ms",
                                  job.metadata.name, job.metadata.id, job.metadata.timeout.count());
+                    complete_terminal_failure(job, make_runtime_exception_ptr("Job expired before execution"));
                     Metrics::instance().job_failed().Increment();
                 }
             }
@@ -122,12 +134,18 @@ void ThreadPool::worker_loop() {
                 spdlog::warn("Retrying job {} (ID: {}) [attempt {}/{}]",job.metadata.name, job.metadata.id,
                              job.metadata.current_retry + 1, job.metadata.max_retries);
                 job.metadata.current_retry++;
-                retried = true;
-                job_queue_.push(std::move(job));
+                if (job_queue_.push(std::move(job))) {
+                    retried = true;
+                } else {
+                    spdlog::warn("Retry requeue rejected for job {} (ID: {}) during shutdown",
+                                 job.metadata.name, job.metadata.id);
+                    complete_terminal_failure(job, make_runtime_exception_ptr("Retry requeue rejected during shutdown"));
+                }
             } else if (job.metadata.allow_retry) {
                 spdlog::info("Job {} (ID: {}) not retried: timed_out={}, current_retry={}, max_retries={}",
                              job.metadata.name, job.metadata.id, timed_out,
                              job.metadata.current_retry, job.metadata.max_retries);
+                complete_terminal_failure(job, std::current_exception());
             }
 
             if (!retried) {
@@ -136,16 +154,34 @@ void ThreadPool::worker_loop() {
             }
         } catch (...) {
             spdlog::error("Job {} (ID: {}) failed with unknown error", job.metadata.name, job.metadata.id);
+            complete_terminal_failure(job, make_runtime_exception_ptr("Job failed with unknown error"));
             Metrics::instance().job_failed().Increment();
             Metrics::instance().active_jobs().Decrement();
         }
 
         if (!retried) {
-            jobs_in_progress_--;
-            if (jobs_in_progress_ == 0) {
-                std::unique_lock lock(done_mutex_);
-                cv_done_.notify_all();
-            }
+            notify_job_finished();
         }
+    }
+}
+
+void ThreadPool::complete_terminal_failure(JobQueue::Job& job, std::exception_ptr ex) {
+    if (!job.on_terminal_failure) {
+        return;
+    }
+
+    try {
+        job.on_terminal_failure(std::move(ex));
+    } catch (const std::future_error& e) {
+        spdlog::warn("Failed to complete promise for job {} (ID: {}): {}",
+                     job.metadata.name, job.metadata.id, e.what());
+    }
+}
+
+void ThreadPool::notify_job_finished() {
+    jobs_in_progress_--;
+    if (jobs_in_progress_ == 0) {
+        std::unique_lock lock(done_mutex_);
+        cv_done_.notify_all();
     }
 }

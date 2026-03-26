@@ -16,9 +16,12 @@ Build a portfolio-quality concurrency project that demonstrates:
 - Replaced the old per-job timeout thread path with deadline-based expiry checked by worker threads
 - Removed detached timeout execution so shutdown no longer leaves hidden background work behind
 - Clarified retry accounting so only terminal failures update failure metrics
+- Made `JobQueue::push()` report enqueue rejection during shutdown so submit/retry paths do not silently lose work
+- Ensured terminal pre-run failures (for example, expiry before execution or retry requeue rejection during shutdown) complete `future`-based jobs with an exception
 - Added edge-case coverage showing:
   - a running job is allowed to finish even if its timeout budget is smaller
   - a queued job that misses its deadline is skipped before execution
+  - a future-based queued job that expires before execution completes with an exception instead of hanging
 - Kept the worker model bounded: only pool workers execute jobs
 
 ## Current Scope
@@ -47,7 +50,9 @@ Build a portfolio-quality concurrency project that demonstrates:
 - Timeout is implemented as a deadline check before execution, not as preemptive interruption of a running task.
 - No per-job execution threads are created for timeout handling, and no detached worker threads are left behind.
 - A running task is allowed to finish once it has started, even if its timeout budget would have elapsed during execution.
+- `JobQueue::push()` can reject enqueue during shutdown; submit and retry paths treat that as a real failure instead of silently dropping the job.
 - `shutdown(timeout_s)` is a graceful shutdown wait budget: it waits for tracked in-flight jobs, then closes the queue and joins worker threads.
+- For `future`-based jobs, terminal pre-run failures still complete the promise with an exception rather than leaving `future.get()` blocked indefinitely.
 - `active_jobs` currently tracks in-flight submitted jobs (queued + running), not only jobs actively executing on CPU.
 - `DISABLE_METRICS` is mainly intended for tests, bench runs, and minimal builds without Prometheus linkage.
 
@@ -111,7 +116,15 @@ http://localhost:8080/metrics
 
 ### CMake Status
 
-The current `CMakeLists.txt` is not yet fully aligned with the full runtime feature set in `main.cpp` (metrics, cxxopts, and test targets are not fully modeled there yet). For now, the manual build commands above are the source of truth.
+The repository now includes a working CMake path for tests and bench builds with MinGW + vcpkg. The full `server` target still depends on metrics-related packages (`prometheus-cpp`, `cxxopts`) being installed for the selected triplet.
+
+Verified locally for test targets with:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe -DCMAKE_TOOLCHAIN_FILE=C:/Users/16210/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-mingw-static -DBUILD_SERVER=OFF
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
 
 ## Tests
 
@@ -130,12 +143,14 @@ Covered areas:
 - Retry-until-success behavior
 - Running-job timeout semantics (started work is not preempted)
 - Deadline expiry / skip-before-run coverage
+- Expired future job completes with exception
 - LRU cache insert/get/eviction
 
-Verified locally on March 11, 2026:
+Verified locally on March 26, 2026:
 
 - `test_edge_cases.exe`: passed
 - `test_job_queue.exe`: passed
+- `ctest --test-dir build --output-on-failure`: passed
 
 ## Benchmark Notes
 
@@ -184,6 +199,7 @@ This project follows a simple three-layer pipeline: Submit -> Queue -> Worker.
 1. Submit (Producer)
 - `ThreadPool::submit(...)` checks the pool-level stop flag `running_`
 - the task is wrapped and pushed into the shared `JobQueue`
+- enqueue is treated as accepted only if `JobQueue::push()` succeeds
 - future-based submit uses a `std::promise`
 - if retries are enabled, intermediate failures do not complete the promise; the `future` reflects the final logical outcome
 - `jobs_in_progress_` is incremented so shutdown can wait for outstanding work
@@ -193,23 +209,65 @@ This project follows a simple three-layer pipeline: Submit -> Queue -> Worker.
 - queue access is protected by `JobQueue::mutex_`
 - `not_full_cv_` blocks producers when the queue is full
 - `not_empty_cv_` blocks consumers when the queue is empty
+- `push()` returns `false` if shutdown is observed before enqueue succeeds
 - shutdown sets `JobQueue::shutdown_` and wakes blocked producers and consumers so they can exit cleanly
 
 3. Worker (Execution + Retry + Deadline Expiry)
 - each worker blocks on `JobQueue::pop()`
 - before executing a timed job, the worker compares `enqueue_time + timeout` against the current start time
 - if the deadline has already passed, the job is skipped and counted as failed without executing `job.task()`
+- future-based jobs use a terminal-failure callback so pre-run expiry and failed retry requeue still complete the promise with an exception
 - if the job has already started running, the pool does not try to interrupt it
 - on exception, the job may be re-enqueued if retry is enabled and retry budget remains
+- retry is considered successful only after the re-enqueue actually succeeds
 - on terminal completion, `jobs_in_progress_` is decremented and `cv_done_` can wake shutdown waiters
 
 > Note: this project intentionally avoids detached timeout threads. A timeout means "expired before start," not "preempted while running."
+
+## Concurrency Guarantees
+
+- `JobQueue::mutex_` protects queue state, including `queue_`, `shutdown_`, and the wait predicates used by `push()` and `pop()`.
+- `ThreadPool::running_` is atomic because submitters and shutdown coordination read and update pool state across threads without relying on the queue lock.
+- `ThreadPool::jobs_in_progress_` is atomic because submitters, workers, and shutdown logic all observe or update it concurrently.
+- `ThreadPool::done_mutex_` is used only with `cv_done_` for shutdown waiting and notification; it is separate from queue-state protection.
+- Worker threads block on the queue condition variable instead of spinning, so idle waiting does not depend on busy-polling.
+
+## Why No Circular Wait Exists
+
+- Queue coordination waits on `JobQueue::mutex_`.
+- Shutdown waiting uses `done_mutex_`.
+- The current design does not require a thread to hold `done_mutex_` while waiting for `JobQueue::mutex_`, or the reverse.
+- Because queue coordination and shutdown coordination are separated, the lock design avoids a circular-wait cycle between those synchronization domains.
+
+## Graceful Shutdown Design
+
+- `shutdown(timeout_s)` first waits up to the configured graceful shutdown budget for `jobs_in_progress_` to reach zero.
+- After that wait completes or times out, `ThreadPool::running_` is set to `false` and `job_queue_.shutdown()` marks the queue as closed.
+- `notify_all` is required so threads blocked in `JobQueue::pop()` and producers blocked in `JobQueue::push()` can wake up, observe shutdown, and stop waiting.
+- Workers exit by calling `pop()` again; when shutdown is active and the queue is empty, `pop()` returns the sentinel job and `worker_loop()` breaks out of its loop.
+
+```text
+Running
+  -> shutdown(timeout_s)
+Waiting For In-Flight Jobs
+  -> jobs_in_progress_ == 0 or wait budget expires
+Closing Queue
+  -> running_ = false
+  -> job_queue_.shutdown()
+Waking Blocked Threads
+  -> not_empty_cv_.notify_all()
+  -> not_full_cv_.notify_all()
+Workers Exit
+  -> pop() returns sentinel when shutdown && queue empty
+Stopped
+```
 
 ## Roadmap
 
 - Align CMake targets with the full runtime, test, and bench feature set
 - Add a first-class cancellation token API if mid-execution cooperative cancellation becomes a goal
 - Tighten logging phrasing around "picked" vs. "running" jobs in the expiry path
+- Consider a non-blocking retry requeue strategy or separate retry buffer so workers do not block on bounded-queue re-enqueue under heavy pressure
 - Add Docker + Prometheus + Grafana demo stack
 
 ## Author
