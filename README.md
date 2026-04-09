@@ -11,17 +11,19 @@ Build a portfolio-quality concurrency project that demonstrates:
 - Practical debugging and test coverage
 - Benchmarking and observability basics
 
-## Recent Additions (as of March 2026)
+## Recent Additions (as of April 2026)
 
 - Replaced the old per-job timeout thread path with deadline-based expiry checked by worker threads
 - Removed detached timeout execution so shutdown no longer leaves hidden background work behind
 - Clarified retry accounting so only terminal failures update failure metrics
 - Made `JobQueue::push()` report enqueue rejection during shutdown so submit/retry paths do not silently lose work
 - Ensured terminal pre-run failures (for example, expiry before execution or retry requeue rejection during shutdown) complete `future`-based jobs with an exception
+- Fixed terminal exception handling for `future`-based jobs when retry is disabled so `future.get()` does not hang
 - Added edge-case coverage showing:
   - a running job is allowed to finish even if its timeout budget is smaller
   - a queued job that misses its deadline is skipped before execution
   - a future-based queued job that expires before execution completes with an exception instead of hanging
+  - a future-based job that throws with `allow_retry=false` still completes with an exception
 - Kept the worker model bounded: only pool workers execute jobs
 
 ## Current Scope
@@ -52,7 +54,7 @@ Build a portfolio-quality concurrency project that demonstrates:
 - A running task is allowed to finish once it has started, even if its timeout budget would have elapsed during execution.
 - `JobQueue::push()` can reject enqueue during shutdown; submit and retry paths treat that as a real failure instead of silently dropping the job.
 - `shutdown(timeout_s)` is a graceful shutdown wait budget: it waits for tracked in-flight jobs, then closes the queue and joins worker threads.
-- For `future`-based jobs, terminal pre-run failures still complete the promise with an exception rather than leaving `future.get()` blocked indefinitely.
+- For `future`-based jobs, terminal failures (including pre-run expiry and non-retry execution exceptions) complete the promise with an exception rather than leaving `future.get()` blocked indefinitely.
 - `active_jobs` currently tracks in-flight submitted jobs (queued + running), not only jobs actively executing on CPU.
 - `DISABLE_METRICS` is mainly intended for tests, bench runs, and minimal builds without Prometheus linkage.
 
@@ -144,6 +146,7 @@ Covered areas:
 - Running-job timeout semantics (started work is not preempted)
 - Deadline expiry / skip-before-run coverage
 - Expired future job completes with exception
+- Future job failure without retry completes with exception (no hang)
 - LRU cache insert/get/eviction
 
 Verified locally on March 26, 2026:
@@ -151,6 +154,10 @@ Verified locally on March 26, 2026:
 - `test_edge_cases.exe`: passed
 - `test_job_queue.exe`: passed
 - `ctest --test-dir build --output-on-failure`: passed
+
+Verified locally on April 9, 2026:
+
+- `test_edge_cases.exe`: passed
 
 ## Benchmark Notes
 

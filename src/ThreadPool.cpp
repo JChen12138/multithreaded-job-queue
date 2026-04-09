@@ -141,10 +141,12 @@ void ThreadPool::worker_loop() {
                                  job.metadata.name, job.metadata.id);
                     complete_terminal_failure(job, make_runtime_exception_ptr("Retry requeue rejected during shutdown"));
                 }
-            } else if (job.metadata.allow_retry) {
-                spdlog::info("Job {} (ID: {}) not retried: timed_out={}, current_retry={}, max_retries={}",
-                             job.metadata.name, job.metadata.id, timed_out,
-                             job.metadata.current_retry, job.metadata.max_retries);
+            } else {
+                if (job.metadata.allow_retry) {
+                    spdlog::info("Job {} (ID: {}) not retried: timed_out={}, current_retry={}, max_retries={}",
+                                 job.metadata.name, job.metadata.id, timed_out,
+                                 job.metadata.current_retry, job.metadata.max_retries);
+                }
                 complete_terminal_failure(job, std::current_exception());
             }
 

@@ -238,4 +238,20 @@ TEST_CASE("expired future job completes with exception") {
     REQUIRE_THROWS_AS(future.get(), std::runtime_error);
 }
 
+TEST_CASE("future job failure without retry completes with exception") {
+    ThreadPool pool(1, 10);
+
+    JobMetadata meta(1, "future_no_retry_failure");
+    meta.allow_retry = false;
+
+    auto future = pool.submit(std::move(meta), []() -> int {
+        throw std::runtime_error("expected failure");
+    });
+
+    pool.shutdown(2);
+
+    REQUIRE(future.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready);
+    REQUIRE_THROWS_AS(future.get(), std::runtime_error);
+}
+
 
