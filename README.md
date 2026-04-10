@@ -16,6 +16,7 @@ Build a portfolio-quality concurrency project that demonstrates:
 - Replaced the old per-job timeout thread path with deadline-based expiry checked by worker threads
 - Removed detached timeout execution so shutdown no longer leaves hidden background work behind
 - Clarified retry accounting so only terminal failures update failure metrics
+- Added a Docker Compose demo stack for the app, Prometheus, and Grafana, with Prometheus datasource provisioning in Grafana
 - Made `JobQueue::push()` report enqueue rejection during shutdown so submit/retry paths do not silently lose work
 - Ensured terminal pre-run failures (for example, expiry before execution or retry requeue rejection during shutdown) complete `future`-based jobs with an exception
 - Fixed terminal exception handling for `future`-based jobs when retry is disabled so `future.get()` does not hang
@@ -80,9 +81,17 @@ Build a portfolio-quality concurrency project that demonstrates:
 |   |-- test_edge_cases.cpp
 |   |-- test_job_queue.cpp
 |   `-- test_LRUCache.cpp
+|-- docker/
+|   |-- grafana/
+|   |   `-- provisioning/
+|   `-- prometheus/
+|       `-- prometheus.yml
 |-- main.cpp
 |-- bench.cpp
 |-- CMakeLists.txt
+|-- Dockerfile
+|-- docker-compose.yml
+|-- vcpkg.json
 `-- README.md
 ```
 
@@ -139,6 +148,8 @@ Notes:
 - The app image builds the `server` target with CMake + vcpkg manifest mode (`vcpkg.json`).
 - The default compose command keeps the process alive for 300 seconds after thread-pool shutdown so Prometheus and Grafana have time to scrape exported metrics.
 - Metrics bind to `127.0.0.1` for local runs and `0.0.0.0` when running inside Docker. You can also override the bind address with `JOB_QUEUE_METRICS_BIND`.
+- Grafana provisions Prometheus automatically as a datasource.
+- Grafana login is the container default (`admin` / `admin`) unless you override it in compose.
 
 ### CMake Status
 
@@ -182,6 +193,13 @@ Verified locally on March 26, 2026:
 Verified locally on April 9, 2026:
 
 - `test_edge_cases.exe`: passed
+
+Verified locally on April 10, 2026:
+
+- `docker compose up --build --force-recreate`: app, Prometheus, and Grafana started successfully
+- `http://localhost:8080/metrics`: verified
+- `http://localhost:9090`: verified
+- `http://localhost:3000`: verified
 
 ## Benchmark Notes
 
