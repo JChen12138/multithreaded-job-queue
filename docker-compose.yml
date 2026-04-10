@@ -1,0 +1,39 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: job-queue-app
+    ports:
+      - "8080:8080"
+    command:
+      - "--threads"
+      - "4"
+      - "--max_queue"
+      - "100"
+      - "--timeout"
+      - "5"
+      - "--job_timeout"
+      - "150"
+      - "--keep_alive_s"
+      - "300"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: job-queue-prometheus
+    depends_on:
+      - app
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: job-queue-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro

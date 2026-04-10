@@ -1,0 +1,6 @@
+.git
+.vscode
+build
+build-mingw
+*.exe
+note.txt

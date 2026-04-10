@@ -24,7 +24,8 @@ int main(int argc, char* argv[]) {\
         ("q,max_queue", "Max queue size", cxxopts::value<int>()->default_value("100"))
         ("test_retry", "Enable test retry jobs")
         ("timeout", "Graceful shutdown wait budget in seconds", cxxopts::value<int>()->default_value("5"))
-        ("job_timeout", "Per-job timeout in milliseconds", cxxopts::value<int>()->default_value("0")) 
+        ("job_timeout", "Per-job timeout in milliseconds", cxxopts::value<int>()->default_value("0"))
+        ("keep_alive_s", "Keep process alive after shutdown so metrics can be scraped", cxxopts::value<int>()->default_value("0"))
         ("h,help", "Print usage");
 
     auto options_result = options.parse(argc, argv);
@@ -79,6 +80,7 @@ int main(int argc, char* argv[]) {\
     bool test_retry = options_result["test_retry"].as<bool>();
 
     int job_timeout_ms = options_result["job_timeout"].as<int>();
+    int keep_alive_s = options_result["keep_alive_s"].as<int>();
 
     
     if (test_retry) {
@@ -164,6 +166,12 @@ int main(int argc, char* argv[]) {\
     });
 
     pool.shutdown(timeout);
+
+    if (keep_alive_s > 0) {
+        spdlog::info("Keeping process alive for {} seconds so metrics remain available at http://0.0.0.0:8080/metrics",
+                     keep_alive_s);
+        std::this_thread::sleep_for(std::chrono::seconds(keep_alive_s));
+    }
 
     return 0;
 }

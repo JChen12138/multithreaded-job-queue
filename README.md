@@ -116,6 +116,30 @@ Metrics endpoint:
 http://localhost:8080/metrics
 ```
 
+### Docker Demo
+
+A minimal Docker stack is included for the app, Prometheus, and Grafana.
+
+Run:
+
+```bash
+docker compose up --build
+```
+
+Endpoints:
+
+```text
+App metrics: http://localhost:8080/metrics
+Prometheus:  http://localhost:9090
+Grafana:     http://localhost:3000
+```
+
+Notes:
+
+- The app image builds the `server` target with CMake + vcpkg manifest mode (`vcpkg.json`).
+- The default compose command keeps the process alive for 300 seconds after thread-pool shutdown so Prometheus and Grafana have time to scrape exported metrics.
+- Metrics bind to `127.0.0.1` for local runs and `0.0.0.0` when running inside Docker. You can also override the bind address with `JOB_QUEUE_METRICS_BIND`.
+
 ### CMake Status
 
 The repository now includes a working CMake path for tests and bench builds with MinGW + vcpkg. The full `server` target still depends on metrics-related packages (`prometheus-cpp`, `cxxopts`) being installed for the selected triplet.
@@ -275,7 +299,7 @@ Stopped
 - Add a first-class cancellation token API if mid-execution cooperative cancellation becomes a goal
 - Tighten logging phrasing around "picked" vs. "running" jobs in the expiry path
 - Consider a non-blocking retry requeue strategy or separate retry buffer so workers do not block on bounded-queue re-enqueue under heavy pressure
-- Add Docker + Prometheus + Grafana demo stack
+- Add a pre-provisioned Grafana dashboard for the exported queue and latency metrics
 
 ## Author
 

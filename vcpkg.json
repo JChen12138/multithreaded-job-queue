@@ -1,0 +1,11 @@
+{
+  "name": "multithreaded-job-queue",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "fmt",
+    "spdlog",
+    "cxxopts",
+    "prometheus-cpp",
+    "catch2"
+  ]
+}

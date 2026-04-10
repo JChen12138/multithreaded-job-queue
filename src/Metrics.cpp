@@ -1,15 +1,31 @@
 #include "Metrics.hpp"
 #include "MetricsServer.hpp"
+#include <cstdlib>
+#include <filesystem>
 #include <prometheus/counter.h>
 #include <prometheus/gauge.h>
 #include <prometheus/registry.h>
 
 using namespace prometheus;
 
+namespace {
+std::string metrics_bind_address() {
+    if (std::getenv("JOB_QUEUE_METRICS_BIND") != nullptr) {
+        return std::getenv("JOB_QUEUE_METRICS_BIND");
+    }
+
+    if (std::filesystem::exists("/.dockerenv")) {
+        return "0.0.0.0:8080";
+    }
+
+    return "127.0.0.1:8080";
+}
+}
+
 void Metrics::init(const std::string& endpoint) {
     endpoint_ = endpoint;
     spdlog::info("Metrics initialized at endpoint: {}", endpoint_);
-    MetricsServer::instance().start("127.0.0.1:8080");
+    MetricsServer::instance().start(metrics_bind_address());
 
     registry_ = MetricsServer::instance().getRegistry();
 

@@ -16,6 +16,7 @@ endif()
 
 find_package(spdlog CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
+find_package(Threads REQUIRED)
 
 add_library(project_warnings INTERFACE)
 target_compile_features(project_warnings INTERFACE cxx_std_17)
@@ -40,14 +41,20 @@ if(BUILD_SERVER)
     target_link_libraries(server PRIVATE
         project_includes
         project_warnings
+        Threads::Threads
         spdlog::spdlog
         fmt::fmt
         cxxopts::cxxopts
         prometheus-cpp::core
         prometheus-cpp::pull
-        ws2_32
-        mswsock
     )
+
+    if(WIN32)
+        target_link_libraries(server PRIVATE
+            ws2_32
+            mswsock
+        )
+    endif()
 endif()
 
 if(BUILD_BENCH)
@@ -61,6 +68,7 @@ if(BUILD_BENCH)
     target_link_libraries(bench PRIVATE
         project_includes
         project_warnings
+        Threads::Threads
         spdlog::spdlog
         fmt::fmt
     )
@@ -80,6 +88,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_job_queue PRIVATE
         project_includes
         project_warnings
+        Threads::Threads
         Catch2::Catch2
         spdlog::spdlog
         fmt::fmt
@@ -95,6 +104,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_edge_cases PRIVATE
         project_includes
         project_warnings
+        Threads::Threads
         Catch2::Catch2
         spdlog::spdlog
         fmt::fmt
@@ -107,6 +117,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_LRUCache PRIVATE
         project_includes
         project_warnings
+        Threads::Threads
         Catch2::Catch2
     )
 

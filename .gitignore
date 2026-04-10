@@ -3,6 +3,7 @@
 
 # CMake and build artifacts
 /build/
+build-mingw/
 
 # Visual Studio / VSCode
 .vscode/
