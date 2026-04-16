@@ -28,18 +28,15 @@ public:
         }
         using ResultType = decltype(func());
 
-        //metadata.allow_retry = false;
-
         auto promise = std::make_shared<std::promise<ResultType>>();
         auto future = promise->get_future();
-        auto retries_left = std::make_shared<std::atomic<int>>(metadata.allow_retry ? metadata.max_retries : 0);
-        //Caller gets a future. ThreadPool keeps the promise.
+        // Caller gets a future. ThreadPool keeps the promise.
 
         auto failure_handler = [promise](std::exception_ptr ex) {
             promise->set_exception(std::move(ex));
         };
 
-        std::function<void()> wrapper = [promise, retries_left, f = std::forward<Func>(func)]() mutable {
+        std::function<void()> wrapper = [promise, f = std::forward<Func>(func)]() mutable {
             try {
                 if constexpr (std::is_void_v<ResultType>) {
                     f();
@@ -51,9 +48,6 @@ public:
             } catch (const std::future_error& e) {
                 spdlog::warn("Promise already fulfilled or invalid: {}", e.what());
             } catch (...) {
-                if (retries_left->load() > 0) {
-                    retries_left->fetch_sub(1);//atomic decrement operation
-                }
                 throw;
             }
         };
@@ -77,6 +71,7 @@ private:
     void worker_loop(); // Worker thread function
     void complete_terminal_failure(JobQueue::Job& job, std::exception_ptr ex);
     void notify_job_finished();
+    bool wait_for_retry_delay_or_shutdown(std::chrono::milliseconds delay);
 
     std::vector<std::thread> workers_;
     JobQueue job_queue_;
@@ -84,5 +79,7 @@ private:
     std::atomic<int> jobs_in_progress_{0};
     std::condition_variable cv_done_;
     std::mutex done_mutex_;
+    std::condition_variable shutdown_cv_;
+    std::mutex shutdown_mutex_;
 
 };

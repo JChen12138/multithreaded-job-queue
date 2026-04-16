@@ -6,12 +6,10 @@
 #include <cxxopts.hpp>
 #include "Metrics.hpp"
 #include "LRUCache.hpp"
+
 LRUCache<std::string, int> result_cache(100); // adjust capacity as needed
 
-
-std::mutex cout_mutex;
-
-int main(int argc, char* argv[]) {\
+int main(int argc, char* argv[]) {
     spdlog::info("Initializing Prometheus metrics server...");
     Metrics::instance().init("/metrics");
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [thread %t] [%l] %v");
@@ -45,7 +43,7 @@ int main(int argc, char* argv[]) {\
     int max_queue = options_result["max_queue"].as<int>();
     ThreadPool pool(num_threads, max_queue);
 
-        // --- Test LRU Cache ---
+    // --- Test LRU Cache ---
     spdlog::info("Testing LRUCache with capacity 3");
     LRUCache<int, std::string> cache(3);
 
@@ -154,14 +152,22 @@ int main(int argc, char* argv[]) {\
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    // Test priority behavior (overwrite job IDs so they're unique)
-    pool.submit(JobMetadata(100, "prio_5", 5), [] {
+    // Demonstrate lower numeric priority running first.
+    JobMetadata prio5(100, "prio_5");
+    prio5.priority = 5;
+    pool.submit(std::move(prio5), [] {
         spdlog::info("Running prio_5 job");
     });
-    pool.submit(JobMetadata(101, "prio_1", 1), [] {
+
+    JobMetadata prio1(101, "prio_1");
+    prio1.priority = 1;
+    pool.submit(std::move(prio1), [] {
         spdlog::info("Running prio_1 job");
     });
-    pool.submit(JobMetadata(102, "prio_9", 9), [] {
+
+    JobMetadata prio9(102, "prio_9");
+    prio9.priority = 9;
+    pool.submit(std::move(prio9), [] {
         spdlog::info("Running prio_9 job");
     });
 

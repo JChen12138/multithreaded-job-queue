@@ -16,6 +16,9 @@ Build a portfolio-quality concurrency project that demonstrates:
 - Replaced the old per-job timeout thread path with deadline-based expiry checked by worker threads
 - Removed detached timeout execution so shutdown no longer leaves hidden background work behind
 - Clarified retry accounting so only terminal failures update failure metrics
+- Added bounded retry with optional exponential backoff and jitter
+- Tightened shutdown admission so new submissions are rejected as soon as shutdown begins
+- Made retry backoff shutdown-aware so in-progress backoff wakes early and is completed as terminal failure instead of re-enqueueing
 - Added a Docker Compose demo stack for the app, Prometheus, and Grafana, with Prometheus datasource provisioning in Grafana
 - Made `JobQueue::push()` report enqueue rejection during shutdown so submit/retry paths do not silently lose work
 - Ensured terminal pre-run failures (for example, expiry before execution or retry requeue rejection during shutdown) complete `future`-based jobs with an exception
@@ -25,12 +28,14 @@ Build a portfolio-quality concurrency project that demonstrates:
   - a queued job that misses its deadline is skipped before execution
   - a future-based queued job that expires before execution completes with an exception instead of hanging
   - a future-based job that throws with `allow_retry=false` still completes with an exception
+  - new submit is rejected once shutdown has started
+  - retry backoff is interrupted when shutdown begins
 - Kept the worker model bounded: only pool workers execute jobs
 
 ## Current Scope
 
 - Thread-safe bounded `JobQueue` with condition variables and priority scheduling
-- `ThreadPool` with blocking worker loop (`pop()`), retry flow, deadline-based expiry, and `future`-based submit
+- `ThreadPool` with blocking worker loop (`pop()`), bounded retry flow with optional backoff/jitter, deadline-based expiry, and `future`-based submit
 - Optional Prometheus metrics integration
 - Thread-safe `LRUCache` utility
 - Catch2 tests for queue, pool edge cases, retry behavior, deadline-expiry behavior, and LRU cache
@@ -39,9 +44,9 @@ Build a portfolio-quality concurrency project that demonstrates:
 
 - Thread-safe `JobQueue` (`std::mutex` + `std::condition_variable`)
 - Bounded queue with producer backpressure
-- Priority scheduling (`std::priority_queue`, lower numeric priority runs first)
+- Priority scheduling via a heap-backed queue (`std::vector` + `std::push_heap` / `std::pop_heap`), where lower numeric priority runs first
 - `ThreadPool::submit()` overloads for fire-and-forget and `std::future` result retrieval
-- Metadata-driven retry (`allow_retry`, `max_retries`, `current_retry`)
+- Metadata-driven retry (`allow_retry`, `max_retries`, `current_retry`) with optional exponential backoff and jitter
 - Per-job deadline/expiry support via `JobMetadata::timeout`
 - Shutdown coordination with in-flight job accounting (`jobs_in_progress_`)
 - Logging with `spdlog`
@@ -51,13 +56,16 @@ Build a portfolio-quality concurrency project that demonstrates:
 ## Important Behavior Notes
 
 - Timeout is implemented as a deadline check before execution, not as preemptive interruption of a running task.
+- Retry remains bounded by `max_retries`; optional backoff/jitter can spread retries out to reduce synchronized retry bursts.
 - No per-job execution threads are created for timeout handling, and no detached worker threads are left behind.
 - A running task is allowed to finish once it has started, even if its timeout budget would have elapsed during execution.
-- `JobQueue::push()` can reject enqueue during shutdown; submit and retry paths treat that as a real failure instead of silently dropping the job.
-- `shutdown(timeout_s)` is a graceful shutdown wait budget: it waits for tracked in-flight jobs, then closes the queue and joins worker threads.
+- `JobQueue::push()` rejects enqueue once shutdown starts; submit and retry paths treat that as a real failure instead of silently dropping work.
+- `shutdown(timeout_s)` begins by stopping new submissions and closing the queue to new enqueues, then waits up to the configured budget for already-accepted work to finish.
+- Shutdown is treated as a hard admission boundary: accepted running work may finish, but retry is not allowed to extend the shutdown window once shutdown has started.
 - For `future`-based jobs, terminal failures (including pre-run expiry and non-retry execution exceptions) complete the promise with an exception rather than leaving `future.get()` blocked indefinitely.
 - `active_jobs` currently tracks in-flight submitted jobs (queued + running), not only jobs actively executing on CPU.
 - `DISABLE_METRICS` is mainly intended for tests, bench runs, and minimal builds without Prometheus linkage.
+- Current retry backoff is applied inline in the worker thread before re-enqueue; if shutdown starts during backoff, the retry is abandoned instead of being re-queued.
 
 ## Project Structure
 
@@ -178,6 +186,9 @@ Covered areas:
 - Submit-after-shutdown error path
 - Future-returning submit
 - Retry-until-success behavior
+- Retry backoff delay behavior
+- Submit rejection once shutdown has started
+- Retry backoff interruption during shutdown
 - Running-job timeout semantics (started work is not preempted)
 - Deadline expiry / skip-before-run coverage
 - Expired future job completes with exception
@@ -200,6 +211,12 @@ Verified locally on April 10, 2026:
 - `http://localhost:8080/metrics`: verified
 - `http://localhost:9090`: verified
 - `http://localhost:3000`: verified
+
+Verified locally on April 16, 2026:
+
+- updated `test_edge_cases` build with MinGW + `DISABLE_METRICS`: passed
+- confirmed submit rejection once shutdown starts: passed
+- confirmed retry backoff interruption during shutdown: passed
 
 ## Benchmark Notes
 
@@ -237,7 +254,7 @@ Layer 3: Worker
   ThreadPool::worker_loop()
   - blocking pop()
   - optional deadline-expiry check before execution
-  - optional retry re-enqueue path
+  - optional retry re-enqueue path with backoff/jitter
   - decrements jobs_in_progress_ on terminal completion
 ```
 
@@ -249,17 +266,18 @@ This project follows a simple three-layer pipeline: Submit -> Queue -> Worker.
 - `ThreadPool::submit(...)` checks the pool-level stop flag `running_`
 - the task is wrapped and pushed into the shared `JobQueue`
 - enqueue is treated as accepted only if `JobQueue::push()` succeeds
+- once shutdown starts, new submissions are rejected instead of extending the drain window
 - future-based submit uses a `std::promise`
 - if retries are enabled, intermediate failures do not complete the promise; the `future` reflects the final logical outcome
 - `jobs_in_progress_` is incremented so shutdown can wait for outstanding work
 
 2. Queue (Bounded + Priority Scheduling)
-- `JobQueue` owns the shared container `std::priority_queue<Job>` where lower `priority` values run first
+- `JobQueue` owns a heap-backed `std::vector<Job>` where lower `priority` values run first
 - queue access is protected by `JobQueue::mutex_`
 - `not_full_cv_` blocks producers when the queue is full
 - `not_empty_cv_` blocks consumers when the queue is empty
-- `push()` returns `false` if shutdown is observed before enqueue succeeds
-- shutdown sets `JobQueue::shutdown_` and wakes blocked producers and consumers so they can exit cleanly
+- `push()` returns `false` once shutdown has started or if shutdown is observed before enqueue succeeds
+- shutdown sets `JobQueue::shutdown_` immediately and wakes blocked producers and consumers so they can exit cleanly or drain remaining accepted work
 
 3. Worker (Execution + Retry + Deadline Expiry)
 - each worker blocks on `JobQueue::pop()`
@@ -268,6 +286,8 @@ This project follows a simple three-layer pipeline: Submit -> Queue -> Worker.
 - future-based jobs use a terminal-failure callback so pre-run expiry and failed retry requeue still complete the promise with an exception
 - if the job has already started running, the pool does not try to interrupt it
 - on exception, the job may be re-enqueued if retry is enabled and retry budget remains
+- when configured, retry delay uses exponential backoff and optional jitter before re-enqueue
+- if shutdown starts during backoff, the retry is interrupted and completed as a terminal failure rather than being re-enqueued
 - retry is considered successful only after the re-enqueue actually succeeds
 - on terminal completion, `jobs_in_progress_` is decremented and `cv_done_` can wake shutdown waiters
 
@@ -290,19 +310,20 @@ This project follows a simple three-layer pipeline: Submit -> Queue -> Worker.
 
 ## Graceful Shutdown Design
 
-- `shutdown(timeout_s)` first waits up to the configured graceful shutdown budget for `jobs_in_progress_` to reach zero.
-- After that wait completes or times out, `ThreadPool::running_` is set to `false` and `job_queue_.shutdown()` marks the queue as closed.
+- `shutdown(timeout_s)` first flips the pool into a non-admitting state and closes the queue to new enqueues.
+- It then waits up to the configured graceful shutdown budget for `jobs_in_progress_` to reach zero.
 - `notify_all` is required so threads blocked in `JobQueue::pop()` and producers blocked in `JobQueue::push()` can wake up, observe shutdown, and stop waiting.
 - Workers exit by calling `pop()` again; when shutdown is active and the queue is empty, `pop()` returns the sentinel job and `worker_loop()` breaks out of its loop.
+- Workers already executing a task are still allowed to finish; workers waiting inside retry backoff wake early and abandon the retry when shutdown begins.
 
 ```text
 Running
   -> shutdown(timeout_s)
-Waiting For In-Flight Jobs
-  -> jobs_in_progress_ == 0 or wait budget expires
-Closing Queue
+Closing Queue / Stop Admission
   -> running_ = false
   -> job_queue_.shutdown()
+Waiting For In-Flight Jobs
+  -> jobs_in_progress_ == 0 or wait budget expires
 Waking Blocked Threads
   -> not_empty_cv_.notify_all()
   -> not_full_cv_.notify_all()
@@ -316,7 +337,7 @@ Stopped
 - Align CMake targets with the full runtime, test, and bench feature set
 - Add a first-class cancellation token API if mid-execution cooperative cancellation becomes a goal
 - Tighten logging phrasing around "picked" vs. "running" jobs in the expiry path
-- Consider a non-blocking retry requeue strategy or separate retry buffer so workers do not block on bounded-queue re-enqueue under heavy pressure
+- Consider a non-blocking delayed retry buffer or separate scheduler path so workers do not sleep inline under heavy retry pressure
 - Add a pre-provisioned Grafana dashboard for the exported queue and latency metrics
 
 ## Author

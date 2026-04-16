@@ -12,6 +12,9 @@ struct JobMetadata {
     int max_retries = 0;
     int current_retry = 0;
     std::chrono::milliseconds timeout = std::chrono::milliseconds(0); // 0 = no timeout
+    std::chrono::milliseconds retry_backoff_base = std::chrono::milliseconds(0);
+    std::chrono::milliseconds retry_max_backoff = std::chrono::milliseconds(0);
+    double retry_jitter_factor = 0.0; // 0.2 = +/-20% jitter
     std::atomic<bool> cancel_requested{false};
     bool allow_retry = true;
     int priority = 10;
@@ -33,6 +36,9 @@ struct JobMetadata {
           max_retries(other.max_retries),
           current_retry(other.current_retry),
           timeout(other.timeout),
+          retry_backoff_base(other.retry_backoff_base),
+          retry_max_backoff(other.retry_max_backoff),
+          retry_jitter_factor(other.retry_jitter_factor),
           allow_retry(other.allow_retry),
           priority(other.priority) {
         cancel_requested.store(other.cancel_requested.load());
@@ -48,6 +54,9 @@ struct JobMetadata {
             max_retries = other.max_retries;
             current_retry = other.current_retry;
             timeout = other.timeout;
+            retry_backoff_base = other.retry_backoff_base;
+            retry_max_backoff = other.retry_max_backoff;
+            retry_jitter_factor = other.retry_jitter_factor;
             allow_retry = other.allow_retry;
             priority = other.priority; 
             cancel_requested.store(other.cancel_requested.load());

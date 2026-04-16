@@ -1,5 +1,9 @@
 #include "ThreadPool.hpp"
 #include <exception>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <random>
 #include <spdlog/spdlog.h>
 #include <thread>
 #include "formatters/thread_id_formatter.hpp"
@@ -7,6 +11,36 @@
 namespace {
 std::exception_ptr make_runtime_exception_ptr(const char* message) {
     return std::make_exception_ptr(std::runtime_error(message));
+}
+
+std::chrono::milliseconds compute_retry_delay(const JobMetadata& metadata) {
+    if (metadata.retry_backoff_base.count() <= 0) {
+        return std::chrono::milliseconds(0);
+    }
+
+    long long delay_ms = metadata.retry_backoff_base.count();
+    const int exponent = std::max(0, metadata.current_retry - 1);
+    for (int i = 0; i < exponent; ++i) {
+        if (delay_ms > std::numeric_limits<long long>::max() / 2) {
+            delay_ms = std::numeric_limits<long long>::max();
+            break;
+        }
+        delay_ms *= 2;
+    }
+
+    if (metadata.retry_max_backoff.count() > 0) {
+        delay_ms = std::min(delay_ms, metadata.retry_max_backoff.count());
+    }
+
+    if (metadata.retry_jitter_factor > 0.0) {
+        thread_local std::mt19937 generator(std::random_device{}());
+        std::uniform_real_distribution<double> distribution(-metadata.retry_jitter_factor,
+                                                            metadata.retry_jitter_factor);
+        const double multiplier = std::max(0.0, 1.0 + distribution(generator));
+        delay_ms = static_cast<long long>(std::llround(delay_ms * multiplier));
+    }
+
+    return std::chrono::milliseconds(std::max<long long>(0, delay_ms));
 }
 }
 
@@ -39,6 +73,9 @@ void ThreadPool::submit(JobMetadata&& metadata, std::function<void()> task) {
 
 void ThreadPool::shutdown(int timeout_seconds) {
     spdlog::info("Shutdown started...");
+    running_ = false;
+    shutdown_cv_.notify_all();
+    job_queue_.shutdown();
     spdlog::info("Waiting for {} jobs to finish", jobs_in_progress_.load());
     std::unique_lock<std::mutex> lock(done_mutex_);
     bool finished = cv_done_.wait_for(lock, std::chrono::seconds(timeout_seconds), [this]() {
@@ -49,9 +86,6 @@ void ThreadPool::shutdown(int timeout_seconds) {
     } else {
         spdlog::info("All jobs completed. Proceeding with shutdown.");
     }
-
-    running_ = false;
-    job_queue_.shutdown();
 
     for (auto& worker : workers_) {
         if (worker.joinable()) {
@@ -134,6 +168,29 @@ void ThreadPool::worker_loop() {
                 spdlog::warn("Retrying job {} (ID: {}) [attempt {}/{}]",job.metadata.name, job.metadata.id,
                              job.metadata.current_retry + 1, job.metadata.max_retries);
                 job.metadata.current_retry++;
+                const auto retry_delay = compute_retry_delay(job.metadata);
+                if (retry_delay.count() > 0) {
+                    spdlog::info("Applying retry backoff of {}ms for job {} (ID: {})",
+                                 retry_delay.count(), job.metadata.name, job.metadata.id);
+                    if (!wait_for_retry_delay_or_shutdown(retry_delay)) {
+                        spdlog::warn("Retry backoff interrupted by shutdown for job {} (ID: {})",
+                                     job.metadata.name, job.metadata.id);
+                        complete_terminal_failure(job, make_runtime_exception_ptr("Retry interrupted by shutdown"));
+                        Metrics::instance().job_failed().Increment();
+                        Metrics::instance().active_jobs().Decrement();
+                        notify_job_finished();
+                        continue;
+                    }
+                }
+                if (!running_) {
+                    spdlog::warn("Retry skipped because shutdown has started for job {} (ID: {})",
+                                 job.metadata.name, job.metadata.id);
+                    complete_terminal_failure(job, make_runtime_exception_ptr("Retry skipped during shutdown"));
+                    Metrics::instance().job_failed().Increment();
+                    Metrics::instance().active_jobs().Decrement();
+                    notify_job_finished();
+                    continue;
+                }
                 if (job_queue_.push(std::move(job))) {
                     retried = true;
                 } else {
@@ -186,4 +243,11 @@ void ThreadPool::notify_job_finished() {
         std::unique_lock lock(done_mutex_);
         cv_done_.notify_all();
     }
+}
+
+bool ThreadPool::wait_for_retry_delay_or_shutdown(std::chrono::milliseconds delay) {
+    std::unique_lock<std::mutex> lock(shutdown_mutex_);
+    return shutdown_cv_.wait_for(lock, delay, [this]() {
+        return !running_.load();
+    }) == false;
 }

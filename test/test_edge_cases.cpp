@@ -111,6 +111,38 @@ TEST_CASE("submit after shutdown throws") {
     );
 }
 
+TEST_CASE("submit is rejected once shutdown starts") {
+    ThreadPool pool(1, 10);
+
+    std::atomic<bool> blocker_started = false;
+    std::atomic<bool> allow_blocker_exit = false;
+
+    pool.submit(JobMetadata(1, "blocker"), [&] {
+        blocker_started = true;
+        while (!allow_blocker_exit.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+
+    while (!blocker_started.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    std::thread shutdown_thread([&] {
+        pool.shutdown(2);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    REQUIRE_THROWS_AS(
+        pool.submit(JobMetadata(2, "late_during_shutdown"), []{}),
+        std::runtime_error
+    );
+
+    allow_blocker_exit = true;
+    shutdown_thread.join();
+}
+
 TEST_CASE("submit with future returns correct value") {
     ThreadPool pool(2, 10);
 
@@ -153,9 +185,107 @@ TEST_CASE("job retries until success") {
         }
     });
 
+    while (attempts.load() < 3) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
     pool.shutdown(5);
 
     REQUIRE(attempts == 3);
+}
+
+TEST_CASE("retry backoff delays the next attempt") {
+    ThreadPool pool(1, 10);
+
+    std::atomic<int> attempts = 0;
+    std::chrono::steady_clock::time_point first_attempt_time;
+    std::chrono::steady_clock::time_point second_attempt_time;
+
+    JobMetadata meta(1, "retry_backoff");
+    meta.allow_retry = true;
+    meta.max_retries = 1;
+    meta.retry_backoff_base = std::chrono::milliseconds(80);
+    meta.retry_jitter_factor = 0.0;
+
+    pool.submit(std::move(meta), [&] {
+        const int attempt = ++attempts;
+        if (attempt == 1) {
+            first_attempt_time = std::chrono::steady_clock::now();
+            throw std::runtime_error("fail once");
+        }
+
+        second_attempt_time = std::chrono::steady_clock::now();
+    });
+
+    while (attempts.load() < 2) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    pool.shutdown(2);
+
+    REQUIRE(attempts == 2);
+    REQUIRE(second_attempt_time - first_attempt_time >= std::chrono::milliseconds(70));
+}
+
+TEST_CASE("retry jitter still respects retry budget and eventually succeeds") {
+    ThreadPool pool(1, 10);
+
+    std::atomic<int> attempts = 0;
+
+    JobMetadata meta(1, "retry_jitter");
+    meta.allow_retry = true;
+    meta.max_retries = 2;
+    meta.retry_backoff_base = std::chrono::milliseconds(20);
+    meta.retry_max_backoff = std::chrono::milliseconds(100);
+    meta.retry_jitter_factor = 0.25;
+
+    pool.submit(std::move(meta), [&] {
+        if (++attempts < 3) {
+            throw std::runtime_error("transient failure");
+        }
+    });
+
+    while (attempts.load() < 3) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    pool.shutdown(2);
+
+    REQUIRE(attempts == 3);
+}
+
+TEST_CASE("retry backoff is interrupted when shutdown starts") {
+    ThreadPool pool(1, 10);
+
+    std::atomic<int> attempts = 0;
+    std::atomic<bool> first_attempt_done = false;
+    std::atomic<bool> shutdown_returned = false;
+
+    JobMetadata meta(1, "retry_shutdown_interrupt");
+    meta.allow_retry = true;
+    meta.max_retries = 3;
+    meta.retry_backoff_base = std::chrono::milliseconds(1000);
+    meta.retry_jitter_factor = 0.0;
+
+    pool.submit(std::move(meta), [&] {
+        attempts++;
+        first_attempt_done = true;
+        throw std::runtime_error("always fail");
+    });
+
+    while (!first_attempt_done.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    std::thread shutdown_thread([&] {
+        pool.shutdown(2);
+        shutdown_returned = true;
+    });
+
+    shutdown_thread.join();
+
+    REQUIRE(shutdown_returned == true);
+    REQUIRE(attempts == 1);
 }
 
 TEST_CASE("running job is allowed to finish even if timeout budget is smaller") {

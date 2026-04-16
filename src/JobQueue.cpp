@@ -11,7 +11,8 @@ bool JobQueue::push(Job job) { // pushing A Job struct(contains: metadata, std::
     });
 
     if (shutdown_) return false;
-    queue_.push(std::move(job));
+    queue_.push_back(std::move(job));
+    std::push_heap(queue_.begin(), queue_.end(), compare_);
     spdlog::info("Queue size after push: {}", queue_.size());
     not_empty_cv_.notify_one();//Wakes up one thread waiting on cv_
     return true;
@@ -25,9 +26,9 @@ JobQueue::Job JobQueue::pop() {
         return Job(JobMetadata(-1, "empty"), []() {});
     }
 
-    //Job job = std::move(queue_.front());
-    Job job = std::move(const_cast<Job&>(queue_.top()));
-    queue_.pop();
+    std::pop_heap(queue_.begin(), queue_.end(), compare_);
+    Job job = std::move(queue_.back());
+    queue_.pop_back();
     not_full_cv_.notify_one();  // signal producer
     return job;
 }
@@ -36,9 +37,9 @@ bool JobQueue::try_pop(Job& job) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (queue_.empty()) return false;
 
-    //job = std::move(queue_.front());
-     job = std::move(const_cast<Job&>(queue_.top()));  
-    queue_.pop();
+    std::pop_heap(queue_.begin(), queue_.end(), compare_);
+    job = std::move(queue_.back());
+    queue_.pop_back();
     not_full_cv_.notify_one();
     return true;
 }
