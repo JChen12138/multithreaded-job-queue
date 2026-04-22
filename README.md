@@ -225,6 +225,43 @@ Verified locally on April 16, 2026:
 - `post_submit_wait_ms` covers remaining runtime until shutdown completes.
 - Microsecond sleep workloads on Windows are scheduler/timer limited and are illustrative only.
 
+## Performance Considerations
+
+The current design favors predictable coordination and clear lifecycle semantics over lock-free complexity. All queue operations are serialized through `JobQueue::mutex_`, which keeps correctness straightforward but also makes the queue lock the main shared coordination point under heavy producer/consumer concurrency.
+
+### Lock Contention
+
+- `push()`, `pop()`, `try_pop()`, `empty()`, `shutdown()`, and `is_shutdown()` all acquire the queue mutex.
+- Under high submission rates, producers contend with workers that are popping jobs from the same queue.
+- The critical section is intentionally small: workers only hold the queue lock while modifying the heap and condition-variable state, not while executing user tasks.
+- Priority scheduling adds `O(log n)` heap maintenance during push/pop, so queue operations are slightly more expensive than FIFO enqueue/dequeue but still bounded and predictable.
+
+### Bounded Queue Impact
+
+- The bounded queue provides backpressure: producers block when the queue reaches `max_queue_size_`.
+- This protects memory usage and prevents unbounded work accumulation during overload.
+- The tradeoff is that submission latency may include time spent waiting for workers to drain queue capacity.
+- In benchmarks, this means `submit_phase_ms` is not pure enqueue overhead; it can overlap with real execution because producers may block while workers make room.
+
+### Worker Count Tuning
+
+- For CPU-bound jobs, a worker count near hardware concurrency is usually a reasonable starting point.
+- For I/O-like or sleep-heavy jobs, more workers may improve throughput because many workers spend time blocked instead of consuming CPU.
+- Too few workers underutilize available cores and increase queue wait time.
+- Too many workers can increase context switching, queue contention, logging overhead, and cache pressure.
+- The benchmark driver exposes `--threads`, `--jobs`, `--queue`, `--mode`, and workload parameters so the thread count can be evaluated empirically instead of guessed.
+
+### Potential Bottlenecks
+
+- `JobQueue::mutex_`: the central queue lock can become hot with many producers and workers.
+- Heap-backed priority scheduling: `push_heap` and `pop_heap` are `O(log n)` and happen while holding the queue lock.
+- Inline retry backoff: a worker waits during retry delay, which is simple and shutdown-aware but temporarily removes that worker from active processing.
+- Logging and metrics: synchronous logging and metric updates can become visible overhead in high-throughput runs.
+- Future/promise wrapping: future-returning jobs add allocation and synchronization overhead compared with fire-and-forget jobs.
+- Single shared queue: one global queue is easy to reason about, but advanced designs may use work stealing, sharded queues, or per-priority lanes to reduce contention.
+
+These bottlenecks are acceptable for this project because the goal is a correct, observable, bounded worker pipeline. For a production scheduler, the next step would be to measure contention under load and consider a delayed retry scheduler, sharded queues, or work-stealing workers only if benchmark data shows the shared queue is the limiting factor.
+
 ## Metrics Overview
 
 | Metric | Type | Description |
