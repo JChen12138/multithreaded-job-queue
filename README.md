@@ -11,7 +11,7 @@ Build a portfolio-quality concurrency project that demonstrates:
 - Practical debugging and test coverage
 - Benchmarking and observability basics
 
-## Recent Additions (as of April 2026)
+## Highlights
 
 - Replaced the old per-job timeout thread path with deadline-based expiry checked by worker threads
 - Removed detached timeout execution so shutdown no longer leaves hidden background work behind
@@ -161,9 +161,9 @@ Notes:
 
 ### CMake Status
 
-The repository now includes a working CMake path for tests and bench builds with MinGW + vcpkg. The full `server` target still depends on metrics-related packages (`prometheus-cpp`, `cxxopts`) being installed for the selected triplet.
+The repository includes a working CMake path for tests and bench builds with MinGW + vcpkg. The full `server` target still depends on metrics-related packages (`prometheus-cpp`, `cxxopts`) being installed for the selected triplet.
 
-Verified locally for test targets with:
+Example verified test-target build:
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe -DCMAKE_TOOLCHAIN_FILE=C:/Users/16210/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-mingw-static -DBUILD_SERVER=OFF
@@ -195,28 +195,12 @@ Covered areas:
 - Future job failure without retry completes with exception (no hang)
 - LRU cache insert/get/eviction
 
-Verified locally on March 26, 2026:
+Recent verification:
 
-- `test_edge_cases.exe`: passed
 - `test_job_queue.exe`: passed
-- `ctest --test-dir build --output-on-failure`: passed
-
-Verified locally on April 9, 2026:
-
 - `test_edge_cases.exe`: passed
-
-Verified locally on April 10, 2026:
-
-- `docker compose up --build --force-recreate`: app, Prometheus, and Grafana started successfully
-- `http://localhost:8080/metrics`: verified
-- `http://localhost:9090`: verified
-- `http://localhost:3000`: verified
-
-Verified locally on April 16, 2026:
-
-- updated `test_edge_cases` build with MinGW + `DISABLE_METRICS`: passed
-- confirmed submit rejection once shutdown starts: passed
-- confirmed retry backoff interruption during shutdown: passed
+- `ctest --test-dir build --output-on-failure`: passed
+- Docker demo stack and metrics endpoints: verified
 
 ## Benchmark Notes
 
@@ -271,6 +255,78 @@ These bottlenecks are acceptable for this project because the goal is a correct,
 | `jobs_failed_total` | Counter | Terminal failure paths recorded by the implementation |
 | `active_jobs` | Gauge | In-flight submitted jobs (queued + running) |
 | `job_latency_seconds` | Histogram | Observed job execution latency |
+
+## Metrics & Observability
+
+The project exposes Prometheus metrics through `MetricsServer` and records key lifecycle events with `spdlog`. Metrics are intentionally focused on system-level behavior: accepted work, successful completions, terminal failures, in-flight work, and execution latency.
+
+### Why Histogram Fits Latency
+
+Latency is not a single value; it is a distribution. Averages can hide tail latency, which is often the most important signal in a job queue. `job_latency_seconds` is implemented as a Prometheus histogram so the system can show how many jobs completed under different latency buckets such as `0.01`, `0.05`, `0.1`, `0.3`, `0.5`, `1.0`, and `2.0` seconds.
+
+Histograms are a good fit here because they support:
+
+- Bucketed latency distribution instead of only average latency
+- Tail-latency analysis through Prometheus `histogram_quantile(...)`
+- Low-overhead aggregation across many observations
+- Useful dashboard views for p50, p95, and p99 style latency tracking
+
+### How Latency Is Recorded
+
+Workers measure execution latency around `job.task()` in `ThreadPool::worker_loop()`. The timer starts when a worker picks a job for execution and stops after the task returns successfully. Successful, non-cancelled jobs call:
+
+```cpp
+Metrics::instance().job_latency().Observe(latency.count());
+```
+
+This means `job_latency_seconds` currently measures worker-side execution time, not full end-to-end queue wait time. Queue wait time is still visible indirectly through backlog behavior, `active_jobs`, and benchmark timing, but it is not currently exported as its own histogram.
+
+### How Retry Is Counted
+
+Retry state is tracked per job through `JobMetadata::current_retry` and `JobMetadata::max_retries`. Intermediate retry attempts are logged by the worker when a job throws and retry budget remains. The Prometheus failure counter is intentionally updated only on terminal failure paths, such as retry exhaustion, shutdown-interrupted retry, cancellation, expiry before execution, or non-retry exceptions.
+
+This keeps `jobs_failed_total` aligned with final logical job outcomes instead of counting every transient attempt as a separate failed job. A production extension could add a dedicated metric such as `job_retry_attempts_total` if retry volume needs to be graphed separately from terminal failures.
+
+### Example Metrics Output
+
+Example Prometheus scrape output:
+
+```text
+# HELP jobs_submitted_total Total number of jobs submitted
+# TYPE jobs_submitted_total counter
+jobs_submitted_total 120
+
+# HELP jobs_completed_total Total number of jobs completed
+# TYPE jobs_completed_total counter
+jobs_completed_total 116
+
+# HELP jobs_failed_total Total number of jobs failed
+# TYPE jobs_failed_total counter
+jobs_failed_total 4
+
+# HELP active_jobs Current number of active jobs
+# TYPE active_jobs gauge
+active_jobs 0
+
+# HELP job_latency_seconds Job execution latency in seconds
+# TYPE job_latency_seconds histogram
+job_latency_seconds_bucket{le="0.01"} 12
+job_latency_seconds_bucket{le="0.05"} 45
+job_latency_seconds_bucket{le="0.1"} 83
+job_latency_seconds_bucket{le="0.3"} 110
+job_latency_seconds_bucket{le="0.5"} 116
+job_latency_seconds_bucket{le="1"} 116
+job_latency_seconds_bucket{le="2"} 116
+job_latency_seconds_bucket{le="+Inf"} 116
+job_latency_seconds_sum 18.72
+job_latency_seconds_count 116
+```
+
+For example, Prometheus can estimate p95 latency with:
+
+```promql
+histogram_quantile(0.95, rate(job_latency_seconds_bucket[5m]))
+```
 
 ## Architecture (Submit -> Queue -> Worker)
 
@@ -369,13 +425,49 @@ Workers Exit
 Stopped
 ```
 
-## Roadmap
+## Future Improvements
 
-- Align CMake targets with the full runtime, test, and bench feature set
-- Add a first-class cancellation token API if mid-execution cooperative cancellation becomes a goal
-- Tighten logging phrasing around "picked" vs. "running" jobs in the expiry path
-- Consider a non-blocking delayed retry buffer or separate scheduler path so workers do not sleep inline under heavy retry pressure
-- Add a pre-provisioned Grafana dashboard for the exported queue and latency metrics
+The current implementation intentionally favors a single, easy-to-reason-about bounded queue with clear shutdown and retry semantics. If benchmark data shows the queue lock or scheduling path becoming the limiting factor, the architecture could evolve in several directions.
+
+### Priority Queue Evolution
+
+- Keep the current heap-backed priority queue for simple global ordering when correctness and predictability are more important than maximum throughput.
+- Add FIFO tie-breaking for jobs with the same priority if stable ordering becomes important.
+- Split priorities into separate lanes, such as high/normal/low queues, to reduce heap maintenance cost and make starvation controls easier to reason about.
+- Add priority aging if low-priority jobs can wait too long under sustained high-priority load.
+
+### Sharded Queue
+
+A sharded queue design could reduce contention by giving each worker, or each group of workers, its own local queue. Producers would distribute jobs across shards, and workers would usually pop from their own shard instead of competing on one global mutex.
+
+Potential benefits:
+
+- Lower lock contention under many producers and workers
+- Better cache locality for worker-local queues
+- Higher throughput when the single shared queue becomes hot
+
+Tradeoffs:
+
+- Harder global priority ordering
+- More complex load balancing
+- Need for work stealing when one shard is empty and another is overloaded
+- More complex shutdown and metrics aggregation
+
+### Lock-Free Possibility
+
+A lock-free queue could reduce blocking on the central queue mutex, but it would add significant implementation complexity. Correct lock-free structures require careful atomic operations, memory ordering, object lifetime management, and ABA-safety considerations.
+
+For this project, `std::mutex` plus `std::condition_variable` is the better default because the goal is a correct, observable, bounded scheduler with clear lifecycle behavior. A lock-free queue would only be justified if profiling showed the queue mutex as the dominant bottleneck and simpler designs, such as sharding, were not enough.
+
+### Other Extensions
+
+- Add a non-blocking delayed retry buffer or timer scheduler so workers do not sleep inline during backoff.
+- Add a first-class cancellation token API if mid-execution cooperative cancellation becomes a goal.
+- Add queue-wait latency metrics to complement the current worker execution latency histogram.
+- Add a pre-provisioned Grafana dashboard for queue depth, active jobs, throughput, failure rate, and latency percentiles.
+- Align CMake targets with the full runtime, test, and bench feature set.
+
+If rebuilding from scratch, I would keep the current single-queue design as the baseline for correctness, then introduce sharded queues, delayed retry scheduling, and richer latency metrics only after benchmarks prove the shared queue is the limiting factor.
 
 ## Author
 
